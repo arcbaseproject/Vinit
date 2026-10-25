@@ -13,7 +13,7 @@ jobs:
       matrix:
         cc: [gcc, musl-gcc]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install packages
         run: sudo apt-get update && sudo apt-get install -y musl-tools uidmap
@@ -32,4 +32,11 @@ jobs:
         run: make test-unit
 
       - name: vinit as PID 1 in namespaces
-        run: make CC=${{ matrix.cc }} rootfs && tests/run-ns.sh build/rootfs
+        run: |
+          make CC=${{ matrix.cc }} rootfs
+          tests/run-ns.sh build/rootfs > ns.out 2>&1 || {
+            cat ns.out
+            # Annotations show the cause on the run page without opening logs.
+            { head -n 3 build/ns.log; grep FAIL ns.out | head -n 7; } | sed 's/^/::error::/'
+            exit 1
+          }
