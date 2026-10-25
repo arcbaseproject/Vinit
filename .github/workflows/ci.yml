@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, musl-gcc]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install -y musl-tools uidmap
+
+      # make test runs vinit as PID 1 in unprivileged user namespaces.
+      # Ubuntu 24.04 blocks those by default, and a service switches to
+      # uid 65534, which needs a subordinate uid range.
+      - name: Allow user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          grep -q "^$(id -un):" /etc/subuid || sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$(id -un)"
+
+      # The unit tests need ASan, which musl-gcc cannot link, so they always
+      # use gcc. The matrix compiler builds what boots as PID 1.
+      - name: Unit tests
+        run: make test-unit
+
+      - name: vinit as PID 1 in namespaces
+        run: make CC=${{ matrix.cc }} rootfs && tests/run-ns.sh build/rootfs

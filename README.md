@@ -1,5 +1,7 @@
 # vinit
 
+[![CI](https://github.com/arcbaseproject/Vinit/actions/workflows/ci.yml/badge.svg)](https://github.com/arcbaseproject/Vinit/actions/workflows/ci.yml)
+
 A small init (PID 1) and service supervisor for Linux, written in C17. It
 does not depend on systemd or any other init system.
 
