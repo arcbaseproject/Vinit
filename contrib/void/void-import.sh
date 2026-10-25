@@ -2,7 +2,8 @@
 # Generate vinit services from Void's runit setup:
 #   sysinit.conf   runs /etc/runit/1 (stage 1: mounts, fsck, udev, ...) once
 #   rc-local.conf  runs /etc/rc.local, if executable, like runit stage 2
-#   <name>.conf    one per enabled service in /var/service, run unchanged
+#   <name>.conf    one per enabled service in /var/service (or, under
+#                  vinit, /etc/runit/runsvdir/default), run unchanged
 # Rerun it after enabling or disabling runit services, then run
 # "vinitctl reload".
 set -eu
@@ -46,7 +47,12 @@ EOF
 	after="sysinit rc-local"
 fi
 
-for link in /var/service/*; do
+# /var/service points into /run/runit, which only runit creates at boot.
+# Under vinit it dangles, so read the default runlevel directly.
+svdir=/var/service
+[ -d "$svdir" ] || svdir=/etc/runit/runsvdir/default
+
+for link in "$svdir"/*; do
 	[ -e "$link" ] || continue
 	name=${link##*/}
 	dir=$(readlink -f "$link")
@@ -62,7 +68,7 @@ for link in /var/service/*; do
 	# "sv check X" in a run script means it needs X up first.
 	deps=sysinit
 	for d in $(sed -n 's/.*sv check \([A-Za-z0-9_.@-]*\).*/\1/p' "$dir/run"); do
-		[ -e "/var/service/$d" ] && deps="$deps $d"
+		[ -e "$svdir/$d" ] && deps="$deps $d"
 	done
 	write "$name" <<EOF
 # Generated from $dir by void-import.sh.
