@@ -25,11 +25,16 @@
 #include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/swap.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "vinit.h"
+
+#ifndef SYS_close_range
+#define SYS_close_range 436 /* same number on every architecture; older libc headers lack it */
+#endif
 
 #define SERVICES_TIMEOUT_MS 30000 /* bound on stopping services at shutdown */
 #define TERM_TIMEOUT_MS      5000 /* grace period after SIGTERM to all */
@@ -390,6 +395,11 @@ int main(void)
 	/* Every signal is handled synchronously below; no handlers run. */
 	sigfillset(&all);
 	sigprocmask(SIG_BLOCK, &all, NULL);
+	/* Fds inherited from a parent, such as a container runtime, would
+	 * leak into every service. close_range() needs Linux 5.9. */
+	if (syscall(SYS_close_range, 3, ~0U, 0) < 0)
+		for (int fd = 3; fd < 1024; fd++)
+			close(fd);
 	umask(022);
 	if (chdir("/") < 0)
 		warn("chdir /: %s", strerror(errno));

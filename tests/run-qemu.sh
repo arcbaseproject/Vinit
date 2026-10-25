@@ -11,7 +11,7 @@ accel=
 
 # panic=-1 plus -no-reboot turns a PID 1 crash into a QEMU exit, not a hang.
 boot() {
-	timeout 120 qemu-system-x86_64 $accel -m 128M -nographic -no-reboot \
+	timeout 120 qemu-system-x86_64 $accel -m 128M -nographic -no-reboot -audio none \
 		-kernel "$kernel" -initrd "$initrd" \
 		-append "console=ttyS0 rdinit=/sbin/init panic=-1 loglevel=4 $1" \
 		</dev/null >"$2" 2>&1

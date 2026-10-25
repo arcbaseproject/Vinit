@@ -15,7 +15,7 @@ cdrom=
 
 # The project directory is shared read-only; inside the VM:
 #   mount -t 9p -o trans=virtio,version=9p2000.L vinit /mnt
-exec qemu-system-x86_64 -enable-kvm -cpu host -m 2G -smp 2 \
+exec qemu-system-x86_64 -enable-kvm -cpu host -m 2G -smp 2 -audio none \
 	-drive file="$disk",if=virtio $cdrom \
 	-nic user,model=virtio-net-pci \
 	-virtfs local,path="$(cd "$(dirname "$0")/.." && pwd)",mount_tag=vinit,security_model=none,readonly=on
