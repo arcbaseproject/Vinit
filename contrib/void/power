@@ -1,0 +1,9 @@
+#!/bin/sh
+# Installed as /usr/local/sbin/poweroff, reboot and halt. Under vinit they
+# ask vinit; under runit they run Void's own command, so booting runit
+# again keeps working.
+cmd=${0##*/}
+case $(readlink /proc/1/exe 2>/dev/null) in
+*/vinit) exec vinitctl "$cmd" ;;
+esac
+exec /usr/bin/"$cmd" "$@"

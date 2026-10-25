@@ -1,0 +1,9 @@
+/vinit
+/vinitctl
+/build/
+/tests/config-test
+/tests/service-test
+/tests/event-test
+/tests/client-test
+/tests/svc-test
+/tests/fuzz-config

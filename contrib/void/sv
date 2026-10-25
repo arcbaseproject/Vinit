@@ -1,0 +1,25 @@
+#!/bin/sh
+# Stand-in for runit's sv(8), so Void run scripts work under vinit.
+# Installed as /etc/vinit/compat/sv; only services see it, via their PATH.
+if [ $# -lt 2 ]; then
+	echo "usage: sv check|status|up|down|restart service..." >&2
+	exit 100
+fi
+cmd=$1
+shift
+rc=0
+for s; do
+	s=${s%/}
+	s=${s##*/}
+	case $cmd in
+	check)        vinitctl status "$s" 2>/dev/null | grep -qx 'state: running' || rc=1 ;;
+	status)       vinitctl status "$s" || rc=1 ;;
+	up | start)   vinitctl start "$s" || rc=1 ;;
+	down | stop)  vinitctl stop "$s" || rc=1 ;;
+	restart)      vinitctl restart "$s" || rc=1 ;;
+	*)
+		echo "sv: '$cmd' is not supported under vinit" >&2
+		exit 100 ;;
+	esac
+done
+exit $rc
