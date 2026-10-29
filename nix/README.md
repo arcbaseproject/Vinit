@@ -38,6 +38,8 @@ The module drops `CAP_SYS_ADMIN` before starting Vinit, preventing its
 shutdown from unmounting host filesystems or disabling host swap. Shutdown
 can therefore log permission errors for these operations. Services inherit
 this restriction and `NoNewPrivileges`; setuid elevation is unavailable.
+The unit delegates its cgroup to Vinit, so each service gets its own
+cgroup and `[limits]` work.
 The namespace is not a security sandbox: services still share host files,
 networking and users. Configure `[execution] user` for unprivileged daemons.
 Commands should reference Nix store executables as in the example.

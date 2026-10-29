@@ -7,7 +7,9 @@
  * restart policy.
  *
  * Each service runs in its own session, so its PID is also its process
- * group ID, and stopping it signals the whole group.
+ * group ID, and stopping it signals the whole group. With cgroup v2, each
+ * service also gets its own cgroup, which holds its resource limits and
+ * catches processes that leave the process group.
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -52,6 +54,137 @@ struct child_error {
 
 struct service svc[MAX_SERVICES];
 int nsvc;
+
+/* The cgroup PID 1 started in; services get cgroups below it. Empty
+ * without cgroup v2: then only process groups are used. */
+static char cg_base[256];
+
+static int write_file(const char *path, const char *text)
+{
+	size_t len = strlen(text);
+	ssize_t w;
+	int fd;
+
+	if ((fd = open(path, O_WRONLY | O_CLOEXEC)) < 0)
+		return -1;
+	w = write(fd, text, len);
+	close(fd);
+	return w == (ssize_t)len ? 0 : -1;
+}
+
+/* Path of the service's cgroup, or of file inside it. */
+static void cg_path(const struct service *s, const char *file, char *buf, size_t len)
+{
+	snprintf(buf, len, "%s/%s.service%s%s", cg_base, s->name, file ? "/" : "", file ? file : "");
+}
+
+/* cgroup v2 allows controllers below a non-root cgroup only while no
+ * process is in it, so PID 1 moves into init.scope first. Services run
+ * in <name>.service next to it. */
+void cgroup_init(void)
+{
+	static const char *const controllers[] = { "+cpu", "+memory", "+pids" };
+	char line[256], base[sizeof cg_base], path[sizeof cg_base + 32], *p = NULL;
+	FILE *f;
+
+	if (access(CGROUP_ROOT "/cgroup.controllers", F_OK) < 0) {
+		say("no cgroup v2; services run in process groups only");
+		return;
+	}
+	if ((f = fopen("/proc/self/cgroup", "re"))) {
+		while (!p && fgets(line, sizeof line, f))
+			if (strncmp(line, "0::/", 4) == 0)
+				p = line + 3;
+		fclose(f);
+	}
+	if (!p)
+		return;
+	p[strcspn(p, "\n")] = '\0';
+	if (snprintf(base, sizeof base, "%s%s", CGROUP_ROOT, strcmp(p, "/") ? p : "") >=
+	    (int)sizeof base)
+		return;
+	snprintf(path, sizeof path, "%s/init.scope", base);
+	if ((mkdir(path, 0755) < 0 && errno != EEXIST) ||
+	    (strcat(path, "/cgroup.procs"), write_file(path, "0") < 0)) {
+		warn("cannot use cgroup %s: %s", base, strerror(errno));
+		return;
+	}
+	/* Unavailable controllers only make the matching limits fail. */
+	snprintf(path, sizeof path, "%s/cgroup.subtree_control", base);
+	for (size_t i = 0; i < sizeof controllers / sizeof controllers[0]; i++)
+		(void)write_file(path, controllers[i]);
+	strcpy(cg_base, base);
+	say("using cgroup %s", cg_base);
+}
+
+/* Create the service's cgroup and set its limits. A removed limit is
+ * reset to "max", because the cgroup may survive from an earlier run. */
+static int cg_prepare(const struct service *s)
+{
+	char path[sizeof cg_base + 64], val[32];
+	const struct {
+		const char *file;
+		int set;
+	} limits[] = {
+		{ "memory.max", s->memory_max > 0 },
+		{ "pids.max", s->pids_max > 0 },
+		{ "cpu.max", s->cpu_max > 0 },
+	};
+
+	if (!cg_base[0]) {
+		if (!s->memory_max && !s->pids_max && !s->cpu_max)
+			return 0;
+		warn("%s: resource limits need cgroup v2", s->name);
+		return -1;
+	}
+	cg_path(s, NULL, path, sizeof path);
+	if (mkdir(path, 0755) < 0 && errno != EEXIST) {
+		warn("%s: mkdir %s: %s", s->name, path, strerror(errno));
+		return -1;
+	}
+	for (size_t i = 0; i < sizeof limits / sizeof limits[0]; i++) {
+		if (i == 0)
+			snprintf(val, sizeof val, s->memory_max ? "%lld" : "max", s->memory_max);
+		else if (i == 1)
+			snprintf(val, sizeof val, s->pids_max ? "%d" : "max", s->pids_max);
+		else
+			snprintf(val, sizeof val, s->cpu_max ? "%d 100000" : "max 100000",
+				 s->cpu_max * 1000);
+		cg_path(s, limits[i].file, path, sizeof path);
+		if (write_file(path, val) < 0 && limits[i].set) {
+			warn("%s: cannot set %s: %s", s->name, limits[i].file, strerror(errno));
+			return -1;
+		}
+	}
+	return 0;
+}
+
+/* Signal everything the service started: its process group and, with
+ * cgroups, also processes that left the group with setsid() or
+ * setpgid(). Without a leader, as after a oneshot, only the cgroup. */
+static void kill_service(const struct service *s, int sig)
+{
+	char path[sizeof cg_base + 64], line[32];
+	FILE *f;
+	pid_t pid;
+
+	if (s->pid)
+		kill(-s->pid, sig);
+	if (!cg_base[0])
+		return;
+	/* cgroup.kill (Linux 5.14) cannot race with PID reuse. */
+	cg_path(s, "cgroup.kill", path, sizeof path);
+	if (sig == SIGKILL && write_file(path, "1") == 0)
+		return;
+	cg_path(s, "cgroup.procs", path, sizeof path);
+	if (!(f = fopen(path, "re")))
+		return;
+	/* kill(0) or kill(-1) would hit PID 1's own group or everything. */
+	while (fgets(line, sizeof line, f))
+		if ((pid = (pid_t)atoi(line)) > 1)
+			kill(pid, sig);
+	fclose(f);
+}
 
 static int cmp_names(const void *a, const void *b)
 {
@@ -251,6 +384,16 @@ static _Noreturn void child(const struct service *s, const struct creds *c, int 
 	sigemptyset(&none);
 	sigprocmask(SIG_SETMASK, &none, NULL);
 	setsid();
+	/* Before exec, so nothing the service starts can miss the cgroup. */
+	ce.what = "cgroup";
+	if (cg_base[0]) {
+		char path[sizeof cg_base + 64];
+
+		cg_path(s, "cgroup.procs", path, sizeof path);
+		if (write_file(path, "0") < 0)
+			goto fail;
+	}
+
 	/* PID 1 may log through its own nonblocking, close-on-exec fd 2;
 	 * services get the blocking console from fd 1 instead. */
 	if (fcntl(2, F_GETFD) == FD_CLOEXEC)
@@ -354,7 +497,7 @@ static void start_service(struct service *s, long long now)
 
 	s->started_at = now;
 	s->state = ST_STARTING;
-	if (lookup_creds(s, &c) < 0) {
+	if (lookup_creds(s, &c) < 0 || cg_prepare(s) < 0) {
 		finished(s, 0, now);
 		return;
 	}
@@ -414,8 +557,8 @@ static void stop_service(struct service *s, long long now)
 		return;
 	}
 	say("stopping %s", s->name);
-	kill(-s->pid, SIGTERM);
-	kill(-s->pid, SIGCONT);
+	kill_service(s, SIGTERM);
+	kill_service(s, SIGCONT);
 	s->state = ST_STOPPING;
 	s->deadline = now + s->stop_timeout_ms;
 }
@@ -423,9 +566,15 @@ static void stop_service(struct service *s, long long now)
 /* The process ended, or could not be started. Apply the restart policy. */
 static void finished(struct service *s, int ok, long long now)
 {
+	char path[sizeof cg_base + 64];
 	long long delay;
 
 	s->pid = 0;
+	/* Fails while processes are left, as after some oneshots. */
+	if (cg_base[0]) {
+		cg_path(s, NULL, path, sizeof path);
+		(void)rmdir(path);
+	}
 	if (s->notify) {
 		close(s->notify);
 		s->notify = 0;
@@ -506,7 +655,7 @@ int reap_children(long long now)
 		/* A simple service's leftover processes die with it. A oneshot
 		 * may leave background processes on purpose. */
 		if (s && (s->type == TYPE_SIMPLE || s->state == ST_STOPPING))
-			kill(-s->pid, SIGKILL);
+			kill_service(s, SIGKILL);
 		/* Cannot fail for a child waitid() just reported; if it did,
 		 * peeking again would loop on the same child forever. */
 		if (waitpid(si.si_pid, &st, 0) < 0)
@@ -625,7 +774,7 @@ long long services_step(long long now, int shutting_down)
 				if (s->deadline <= now) {
 					warn("%s did not stop in %d ms, sending SIGKILL", s->name,
 					     s->stop_timeout_ms);
-					kill(-s->pid, SIGKILL);
+					kill_service(s, SIGKILL);
 					s->deadline = LLONG_MAX;
 				} else {
 					earliest(&next, s->deadline);

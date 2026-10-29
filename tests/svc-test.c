@@ -276,7 +276,7 @@ static void stress_tests(void)
 			kill(1, sig);
 	}
 	usleep(100000);
-	ctl(0, "up, 27 services", "status", NULL);
+	ctl(0, "up, 29 services", "status", NULL);
 
 	/* 50 clients at once must all get answers. */
 	for (int i = 0; i < 50; i++)
@@ -315,6 +315,76 @@ static void stress_tests(void)
 		out("FAIL PID 1 leaked during restarts");
 }
 
+static void print_line(const char *path, const char *prefix);
+
+static int read_pid(const char *path)
+{
+	FILE *f;
+	int pid = 0;
+
+	if ((f = fopen(path, "r"))) {
+		if (fscanf(f, "%d", &pid) != 1)
+			pid = 0;
+		fclose(f);
+	}
+	return pid;
+}
+
+/* A child that left the service's process group with setsid() and
+ * ignores SIGTERM. Only the cgroup can find it when the service stops. */
+static void escape_test(void)
+{
+	int child = read_pid("/run/escaper.child");
+
+	ctl(0, "", "stop", "escaper");
+	wait_state("escaper", "inactive");
+	usleep(100000);
+	if (child <= 0)
+		out("FAIL no escaped child recorded");
+	else if (access("/sys/fs/cgroup/cgroup.controllers", F_OK) < 0)
+		out("escaped child %s without cgroups",
+		    kill(child, 0) == 0 ? "survives" : "FAIL is gone");
+	else if (kill(child, 0) < 0)
+		out("escaped child is gone");
+	else
+		out("FAIL escaped child %d survived its service", child);
+}
+
+/* Print the cgroup and limits vinit set, then check that pids.max holds. */
+static void limited(void)
+{
+	static const char *const files[] = { "memory.max", "pids.max", "cpu.max" };
+	char line[256], path[512];
+	pid_t kids[20];
+	int n = 0;
+	FILE *f;
+
+	line[0] = '\0';
+	if ((f = fopen("/proc/self/cgroup", "r"))) {
+		(void)!fgets(line, sizeof line, f);
+		fclose(f);
+	}
+	line[strcspn(line, "\n")] = '\0';
+	out("cgroup %s", line);
+	for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
+		snprintf(path, sizeof path, "/sys/fs/cgroup%s/%s", line + 3, files[i]);
+		print_line(path, "");
+	}
+	for (int i = 0; i < 20; i++) {
+		if ((kids[n] = fork()) == 0) {
+			pause();
+			_exit(0);
+		}
+		if (kids[n] > 0)
+			n++;
+	}
+	out("forks allowed under pids_max = 8: %d", n);
+	for (int i = 0; i < n; i++) {
+		kill(kids[i], SIGKILL);
+		waitpid(kids[i], NULL, 0);
+	}
+}
+
 static void control_tests(void)
 {
 	char big[300];
@@ -323,7 +393,7 @@ static void control_tests(void)
 	ctl(0, "state: running", "status", "base");
 	ctl(0, "state: failed", "status", "crashloop");
 	ctl(0, "last exit: signal 6 (Aborted)", "status", "crashloop");
-	ctl(0, "up, 27 services", "status", NULL);
+	ctl(0, "up, 29 services", "status", NULL);
 	ctl(0, "state: running", "status", "after-ready");
 	ctl(0, "state: failed", "status", "never-ready");
 	ctl(1, "unknown service 'nope'", "start", "nope");
@@ -346,6 +416,8 @@ static void control_tests(void)
 
 	ctl(0, "", "restart", "flaky");
 	wait_state("flaky", "running");
+
+	escape_test();
 
 	raw("\x01\x02", 2, 0, "error: malformed request");
 	raw("", 0, 0, "error: empty request");
@@ -476,8 +548,9 @@ static int check(void)
 	out("zombies after orphans exit: %d", zombies);
 
 	/* An orphan outside any service's process group that ignores
-	 * SIGTERM: the final shutdown must SIGKILL it. Wait until it is set
-	 * up, or stopping this service could kill it first. */
+	 * SIGTERM. Without cgroups the final shutdown must SIGKILL it; with
+	 * them, stopping this service does. Wait until it is set up, or
+	 * stopping this service could kill it first. */
 	if (pipe(ready) < 0)
 		out("FAIL pipe");
 	if (fork() == 0) {
@@ -506,10 +579,17 @@ static int check(void)
 		out("PID 1 open fds: %d", n);
 	}
 	{
-		long before = pid1_ticks();
+		long ticks = 0;
 
-		sleep(3);
-		out("PID 1 CPU ticks during 3 s idle: %ld (%ld per second)", pid1_ticks() - before,
+		/* Up to three windows: the emergency shell, which has no
+		 * /bin/sh here, restarts with backoff and may hit one. */
+		for (int i = 0; i < 3 && (i == 0 || ticks); i++) {
+			long before = pid1_ticks();
+
+			sleep(3);
+			ticks = pid1_ticks() - before;
+		}
+		out("PID 1 CPU ticks during 3 s idle: %ld (%ld per second)", ticks,
 		    sysconf(_SC_CLK_TCK));
 	}
 	control_tests();
@@ -540,6 +620,24 @@ int main(int argc, char **argv)
 		mode = "hook";
 		out("called with %s", argc > 1 ? argv[1] : "(nothing)");
 		out("same session as PID 1: %s", getsid(0) == getsid(1) ? "yes" : "no");
+		/* The hook runs in PID 1's cgroup, so with cgroups this is the
+		 * process that only the final SIGKILL can stop. */
+		{
+			int ready[2];
+			char c;
+
+			if (pipe(ready) < 0)
+				return 1;
+			if (fork() == 0) {
+				setsid();
+				signal(SIGTERM, SIG_IGN);
+				(void)!write(ready[1], "x", 1);
+				for (;;)
+					pause();
+			}
+			close(ready[1]);
+			(void)!read(ready[0], &c, 1);
+		}
 		return 0;
 	}
 	if (argc < 2)
@@ -621,6 +719,33 @@ int main(int argc, char **argv)
 		}
 		out("left child %d behind", (int)c);
 		return 1;
+	} else if (strcmp(argv[1], "escaper") == 0) {
+		int ready[2];
+		pid_t c;
+		char x;
+		FILE *f;
+
+		if (pipe(ready) < 0)
+			return 1;
+		if ((c = fork()) == 0) {
+			setsid();
+			signal(SIGTERM, SIG_IGN);
+			(void)!write(ready[1], "x", 1);
+			for (;;)
+				pause();
+		}
+		if (read(ready[0], &x, 1) != 1)
+			out("FAIL escaped child setup");
+		if ((f = fopen("/run/escaper.child", "w"))) {
+			fprintf(f, "%d\n", (int)c);
+			fclose(f);
+		}
+		if (write(3, "\n", 1) != 1)
+			out("FAIL write to ready_fd 3");
+		close(3);
+		daemon_loop();
+	} else if (strcmp(argv[1], "limited") == 0) {
+		limited();
 	} else if (strcmp(argv[1], "uptime") == 0) {
 		print_line("/proc/uptime", "");
 	} else if (strcmp(argv[1], "check") == 0) {

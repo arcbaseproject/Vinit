@@ -190,6 +190,11 @@ static void mount_api_filesystems(void)
 	}
 	for (size_t i = 0; i < sizeof links / sizeof links[0]; i++)
 		(void)!symlink(links[i][0], links[i][1]);
+	/* Optional: without cgroup v2, services run in process groups only.
+	 * The mount fails in a user namespace without a cgroup namespace. */
+	if (!is_mountpoint(CGROUP_ROOT) &&
+	    mount("cgroup2", CGROUP_ROOT, "cgroup2", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) < 0)
+		say("mount cgroup2 on %s: %s", CGROUP_ROOT, strerror(errno));
 }
 
 /* The kernel leaves fds 0-2 closed when the initramfs has no /dev/console.
@@ -491,6 +496,7 @@ int main(void)
 	pfd[0] = (struct pollfd){ .fd = sfd, .events = POLLIN };
 	pfd[1] = (struct pollfd){ .fd = cfd, .events = POLLIN }; /* poll() skips fd -1 */
 
+	cgroup_init();
 	services_load(SERVICE_DIR);
 
 	for (;;) {

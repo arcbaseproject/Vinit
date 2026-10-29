@@ -171,6 +171,27 @@ int main(void)
 	/* log = X is an ordering dependency on X, which gets the output. */
 	bad("[service]\ncommand = /bin/true\n[execution]\nlog = a b\n", "must be one service name");
 	bad("[service]\ncommand = /bin/true\n[execution]\nlog = x\n", "cannot depend on itself");
+
+	/* Resource limits. */
+	CHECK(parse(s, "lim.conf", "[service]\ncommand = /bin/true\n[limits]\n"
+		    "memory_max = 512M\npids_max = 64\ncpu_max = 250%\n", 0644) == 0);
+	CHECK(s->memory_max == 512LL << 20 && s->pids_max == 64 && s->cpu_max == 250);
+	CHECK(parse(s, "lim.conf", "[service]\ncommand = /bin/true\n[limits]\n"
+		    "memory_max = 4096\n", 0644) == 0);
+	CHECK(s->memory_max == 4096 && s->pids_max == 0 && s->cpu_max == 0);
+	CHECK(parse(s, "lim.conf", "[service]\ncommand = /bin/true\n[limits]\n"
+		    "memory_max = 7T\n", 0644) == 0);
+	CHECK(s->memory_max == 7LL << 40);
+	bad("[service]\ncommand = /bin/true\n[limits]\nmemory_max = 0\n", "from 1 byte");
+	bad("[service]\ncommand = /bin/true\n[limits]\nmemory_max = 1X\n", "size such as");
+	bad("[service]\ncommand = /bin/true\n[limits]\nmemory_max = 1MB\n", "size such as");
+	bad("[service]\ncommand = /bin/true\n[limits]\nmemory_max = -1\n", "size such as");
+	bad("[service]\ncommand = /bin/true\n[limits]\nmemory_max = 9999999999T\n", "from 1 byte");
+	bad("[service]\ncommand = /bin/true\n[limits]\npids_max = 0\n", "from 1 to");
+	bad("[service]\ncommand = /bin/true\n[limits]\ncpu_max = 50\n", "percentage");
+	bad("[service]\ncommand = /bin/true\n[limits]\ncpu_max = %\n", "percentage");
+	bad("[service]\ncommand = /bin/true\n[limits]\ncpu_max = 0%\n", "from 1 to");
+	bad("[service]\ncommand = /bin/true\n[limits]\nnice = 5\n", "unknown key 'nice' in [limits]");
 	CHECK(parse(&tab[0], "a.conf", "[service]\ncommand = /bin/true\n[dependencies]\nafter = c\n"
 		    "[execution]\nlog = b\n", 0644) == 0);
 	CHECK(tab[0].log_dep == 2 && !tab[0].deps[1].hard);

@@ -78,6 +78,11 @@ working_directory = /
 env = LANG=C.UTF-8              # may be repeated
 stdin = null                    # null (default) | console
 log = sshd-log                  # optional: send stdout and stderr to this service
+
+[limits]                        # all optional; each needs cgroup v2
+memory_max = 512M               # bytes, or K/M/G/T (powers of 1024)
+pids_max = 64                   # processes and threads
+cpu_max = 50%                   # of one CPU; 200% = two CPUs
 ```
 
 The `#` comments above are for explanation only. In a real file, comments
@@ -134,12 +139,20 @@ do not exist.
 - The delay doubles after each consecutive restart, up to 60 s.
 - A run that lasts 10 s or more resets the restart count.
 - When the process of a `simple` service exits, vinit kills the rest of
-  its process group.
+  its process group and cgroup.
 - A `oneshot` may leave background processes running on purpose.
+
+**cgroups.** vinit mounts cgroup v2 on `/sys/fs/cgroup` if it is not
+mounted yet. It moves itself into `init.scope` in the cgroup it started
+in, and runs each service in `<name>.service` next to it. Stop and kill
+signals go to the process group and to every process in the cgroup, so
+processes that call `setsid()` or `setpgid()` cannot escape. Without
+cgroup v2, for example in a user namespace, services run in process
+groups only, and a service with `[limits]` fails to start.
 
 **Shutdown** stops services in reverse dependency order. A service stops
 only after every service that depends on it has exited. vinit sends
-SIGTERM to the service's whole process group, then SIGKILL after
+SIGTERM to the service's whole process group and cgroup, then SIGKILL after
 `stop_timeout_ms`. Then vinit does these steps:
 
 1. If `/etc/vinit/shutdown` is executable, run it with the argument
@@ -343,8 +356,9 @@ executions under ASan and UBSan, with no crash and no contract violation.
 
 - `type = forking` (daemons that background themselves) is not supported.
   Run daemons in the foreground.
-- There are no per-service resource limits. Wrap the command with
-  `prlimit` (util-linux) or `chpst -o` (runit) instead.
+- `[limits]` covers memory, process count and CPU only. For other limits,
+  such as open files, wrap the command with `prlimit` (util-linux) or
+  `chpst -o` (runit).
 - The console is never a controlling terminal, so shells started on it
   have no job control. Use a getty on a real tty for that.
 - x86_64 and ARM64 have passed QEMU boot tests; real hardware remains untested.

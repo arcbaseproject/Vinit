@@ -5,6 +5,7 @@
 #include <sys/types.h>
 
 #define SERVICE_DIR   "/etc/vinit/services"
+#define CGROUP_ROOT   "/sys/fs/cgroup"
 #define MAX_SERVICES  64
 #define MAX_ARGS      32
 #define MAX_ENV       16
@@ -36,6 +37,9 @@ struct service {
 	int type, restart, delay_ms, limit, stop_timeout_ms;
 	int ready_fd;           /* fd number the service writes "\n" to when ready */
 	int ready_timeout_ms;   /* 0: wait forever */
+	long long memory_max;   /* bytes; 0: no limit */
+	int pids_max;           /* 0: no limit */
+	int cpu_max;            /* percent of one CPU; 0: no limit */
 	int log_dep;            /* deps[] index of the log service, plus 1; 0: none */
 	struct dep deps[MAX_DEPS];
 	int ndeps;
@@ -67,6 +71,7 @@ void config_resolve(struct service *svc, int n);
 /* service.c */
 struct pollfd;
 
+void cgroup_init(void);
 void services_load(const char *dir);
 int services_reload(const char *dir, long long now, char *msg, size_t len);
 int services_pollfds(struct pollfd *pfd);
