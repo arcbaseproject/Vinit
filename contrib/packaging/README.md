@@ -10,5 +10,12 @@ pages. None of them makes vinit the default init: add
 | Void Linux | [void/template](void/template) | Run `xgensum -i vinit` after the tag exists. |
 | Gentoo | [gentoo/sys-apps/vinit](gentoo/sys-apps/vinit) | Run `ebuild vinit-0.2.0.ebuild manifest` in an overlay. |
 
+The AUR package is not published yet. Until then, build it from this
+directory on Arch:
+
+```sh
+cd contrib/packaging/arch && makepkg -si
+```
+
 The recipes link dynamically, because these distributions keep `/usr`
 on the root filesystem. The Nix package is in [nix/](../../nix).
