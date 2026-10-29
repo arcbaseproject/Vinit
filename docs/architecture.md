@@ -20,6 +20,16 @@ vinit is one single-threaded process, PID 1. Each service runs in its own
 session (`setsid()`), so its PID is also its process group ID. Stopping a
 service signals the whole group.
 
+With cgroup v2, each service also runs in its own cgroup,
+`<name>.service`, below the cgroup that PID 1 started in. PID 1 moves into
+`init.scope` there first, because cgroup v2 enables controllers for a
+non-root cgroup only while no process is in it. The child joins its
+cgroup before `execv()`. vinit sets `memory.max`, `pids.max` and
+`cpu.max` before every start, and resets a removed limit to `max`.
+Signals go to the process group and to each PID in `cgroup.procs`.
+SIGKILL uses `cgroup.kill` (Linux 5.14) where it exists. vinit removes an
+empty cgroup when its service exits. vinit keeps no cgroup fds open.
+
 The service table is a static array (`MAX_SERVICES` = 64). There is no heap
 allocation in the supervisor, so nothing can leak. Untouched BSS pages
 cost no RSS.
@@ -220,6 +230,7 @@ These are not planned. They are listed here so the decision can be made
 on purpose:
 
 - Route service output to a logger service.
-- Resource limits. Until then, wrap the command, for example
+- More resource limits than `[limits]` has. Until then, wrap the
+  command, for example
   `command = /usr/bin/prlimit --nofile=65536 -- /usr/sbin/nginx`.
 - Run the tests in CI.

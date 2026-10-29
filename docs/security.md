@@ -71,16 +71,22 @@ It is **not** an independent audit.
   lines until the console drains. On a stalled serial console, failures
   can go unreported. When the console is not a terminal (for example a
   pipe from a container runtime), writes still block.
-- **No sandboxing.** There are no cgroups, namespaces, seccomp, resource
-  limits or capability bounding for services. Isolation is only the
-  uid/gid switch. `PR_SET_NO_NEW_PRIVS` is not set, because that would
+- **No sandboxing.** There are no namespaces, seccomp or capability
+  bounding for services. Isolation is the uid/gid switch, plus the
+  memory, process and CPU limits in `[limits]` under cgroup v2. `PR_SET_NO_NEW_PRIVS` is not set, because that would
   break getty, login and su.
 - **Request flooding.** Any local user can flood the control socket. Work
   per wakeup is bounded, but a sustained flood keeps vinit busy answering
   `status` and `list`.
-- **Escaping a process group.** A service that calls `setsid()` or
-  `setpgid()` in its children escapes its process group. Those processes
-  are only killed at the final `kill(-1)` during shutdown. Only cgroups
-  would close this gap.
+- **Escaping a process group.** With cgroup v2, a service's processes
+  cannot escape: stopping it signals every process in its cgroup. Without
+  cgroup v2, a child that calls `setsid()` or `setpgid()` escapes its
+  process group. Such processes are only killed at the final `kill(-1)`
+  during shutdown.
+- **PID reuse in a cgroup.** SIGTERM and SIGCONT go to each PID read from
+  `cgroup.procs`. A process that exits between the read and the `kill()`
+  frees its PID for reuse, so the signal could reach an unrelated
+  process. SIGKILL uses `cgroup.kill` where it exists (Linux 5.14), which
+  has no such race.
 - **Hardware coverage.** x86_64 and ARM64 passed the normal and quiet QEMU
   boot/shutdown suites with Linux 6.18.59. Real hardware remains untested.
