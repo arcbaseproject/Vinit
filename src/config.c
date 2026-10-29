@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,14 +19,16 @@
 
 #include "vinit.h"
 
-enum { SEC_SERVICE, SEC_RESTART, SEC_DEPS, SEC_EXEC, NSECTIONS };
-static const char *const sections[] = { "service", "restart", "dependencies", "execution" };
+enum { SEC_SERVICE, SEC_RESTART, SEC_DEPS, SEC_EXEC, SEC_LIMITS, NSECTIONS };
+static const char *const sections[] = { "service", "restart", "dependencies", "execution",
+					"limits" };
 
 enum {
 	K_NAME, K_COMMAND, K_TYPE, K_STOP_TIMEOUT, K_READY_FD, K_READY_TIMEOUT, K_CRITICAL,
 	K_POLICY, K_DELAY, K_LIMIT,
 	K_AFTER, K_REQUIRES,
 	K_USER, K_GROUP, K_WORKDIR, K_ENV, K_STDIN, K_LOG,
+	K_MEMORY_MAX, K_PIDS_MAX, K_CPU_MAX,
 	NKEYS
 };
 
@@ -52,6 +55,9 @@ static const struct {
 	[K_ENV]          = { SEC_EXEC,    "env", 1 },
 	[K_STDIN]        = { SEC_EXEC,    "stdin", 0 },
 	[K_LOG]          = { SEC_EXEC,    "log", 0 },
+	[K_MEMORY_MAX]   = { SEC_LIMITS,  "memory_max", 0 },
+	[K_PIDS_MAX]     = { SEC_LIMITS,  "pids_max", 0 },
+	[K_CPU_MAX]      = { SEC_LIMITS,  "cpu_max", 0 },
 };
 
 static int fail(char *err, size_t len, const char *path, int line, const char *fmt, ...)
@@ -107,6 +113,29 @@ static const char *parse_int(const char *val, long min, long max, int *out)
 		return msg;
 	}
 	*out = (int)v;
+	return NULL;
+}
+
+/* Bytes, with an optional K, M, G or T suffix (powers of 1024). */
+static const char *parse_size(const char *val, long long *out)
+{
+	static const char suffixes[] = "KMGT";
+	unsigned long long v;
+	const char *p;
+	char *end;
+	int shift = 0;
+
+	if (!isdigit((unsigned char)val[0]))
+		return "must be a size such as 512M";
+	errno = 0;
+	v = strtoull(val, &end, 10);
+	if (*end && !end[1] && (p = strchr(suffixes, *end)))
+		shift = 10 * (int)(p - suffixes + 1);
+	else if (*end)
+		return "must be a size such as 512M";
+	if (errno || v == 0 || v > (unsigned long long)LLONG_MAX >> shift)
+		return "must be from 1 byte to 8E";
+	*out = (long long)(v << shift);
 	return NULL;
 }
 
@@ -208,6 +237,7 @@ static const char *copy_name(char *dst, const char *val)
 static const char *apply(struct service *s, int k, char *val)
 {
 	const char *msg;
+	size_t len;
 
 	switch (k) {
 	case K_NAME:
@@ -273,6 +303,17 @@ static const char *apply(struct service *s, int k, char *val)
 		else
 			return "must be null or console";
 		return NULL;
+	case K_MEMORY_MAX:
+		return parse_size(val, &s->memory_max);
+	case K_PIDS_MAX:
+		return parse_int(val, 1, 4194304, &s->pids_max);
+	case K_CPU_MAX:
+		/* Percent of one CPU; 200% is two CPUs. */
+		len = strlen(val);
+		if (len < 2 || val[len - 1] != '%')
+			return "must be a percentage such as 50%";
+		val[len - 1] = '\0';
+		return parse_int(val, 1, 100000, &s->cpu_max);
 	case K_LOG:
 		if (strpbrk(val, " \t"))
 			return "must be one service name";

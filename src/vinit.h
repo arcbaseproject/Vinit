@@ -36,6 +36,9 @@ struct service {
 	int type, restart, delay_ms, limit, stop_timeout_ms;
 	int ready_fd;           /* fd number the service writes "\n" to when ready */
 	int ready_timeout_ms;   /* 0: wait forever */
+	long long memory_max;   /* bytes; 0: no limit */
+	int pids_max;           /* 0: no limit */
+	int cpu_max;            /* percent of one CPU; 0: no limit */
 	int log_dep;            /* deps[] index of the log service, plus 1; 0: none */
 	struct dep deps[MAX_DEPS];
 	int ndeps;
