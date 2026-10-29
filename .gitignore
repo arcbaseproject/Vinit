@@ -1,6 +1,7 @@
 /vinit
 /vinitctl
 /build/
+/result
 /tests/config-test
 /tests/service-test
 /tests/event-test

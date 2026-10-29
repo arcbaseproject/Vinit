@@ -100,7 +100,7 @@ of every service. pidfd therefore adds nothing here.
    into PID 1.
 2. The parent creates a close-on-exec pipe and calls `fork()`.
 3. The child does the following, in order: reset the signal mask,
-   `setsid()`, set stdin, `setgroups()`/`setgid()`/`setuid()`, `chdir()`
+   `setsid()`, connect the `log` pipe, set stdin, `setgroups()`/`setgid()`/`setuid()`, `chdir()`
    (after the privilege drop), set the environment, `execv()`.
 4. If any step fails, the child writes the step name and errno to the pipe
    and exits with 127.
@@ -121,10 +121,13 @@ of every service. pidfd therefore adds nothing here.
 
 1. Refuse to run unless `getpid() == 1`.
 2. Block all signals, set `umask 022`, `chdir /`, and set a default `PATH`.
-3. Mount `/proc`, `/sys`, `/dev`, `/dev/pts` and `/run`. Mount points that
-   are already mounted are skipped. Failures are logged and do not stop
-   the boot.
-4. If fds 0-2 are closed, fill them from `/dev/console`.
+3. Mount `/proc`, `/sys`, `/dev`, `/dev/pts`, `/run` and `/dev/shm`.
+   Mount points that are already mounted are skipped. Failures are logged
+   and do not stop the boot. Create the `/dev/fd`, `/dev/stdin`,
+   `/dev/stdout` and `/dev/stderr` symlinks, which devtmpfs lacks.
+4. If fds 0-2 are closed, fill them from `/dev/console`. If fds 1 and 2
+   are the same terminal, replace fd 2 with a nonblocking, close-on-exec
+   open of it for vinit's own log (see Logging).
 5. Make Ctrl-Alt-Del send SIGINT.
 6. Load and check the services, then enter the loop.
 
@@ -174,11 +177,22 @@ copy's own `cmdbuf`. Dependency indices come from a fresh
 `config_resolve()` on the new table. The built-in emergency shell is kept
 while it runs.
 
+`same_config()` compares the configuration part of the old and new
+entries. A running service whose configuration changed gets
+`restarting = 1` and is stopped, so it starts again with the new
+definition. A removed service that was a log target has its pipe closed.
+
 ## Logging
 
 `say()` is for routine events, and `warn()` is for failures. Both write one
 line per `write()` to the console. `vinit.quiet` on the kernel command line
 (read from `/proc/cmdline`) suppresses `say()`.
+
+On a terminal, vinit's fd 2 is nonblocking, so a stalled serial console
+cannot stall PID 1. A write to a busy console waits up to 1 s. After
+that, vinit drops log lines until a write succeeds again. Services and the
+shutdown hook get the blocking console as their fd 2: the child copies
+fd 1 over fd 2 before `execve()`.
 
 Messages do not go to `/dev/kmsg`. The kernel rate-limits writes to it
 from userspace (`printk.devkmsg=ratelimit`) and would drop boot messages.
@@ -194,13 +208,18 @@ from userspace (`printk.devkmsg=ratelimit`) and would drop boot messages.
   it are not affected.
 - `restart` stops the process, then starts it again with no delay, and
   leaves dependents alone. A finished oneshot runs again.
+- When a service exits on its own (a crash, or a timeout before it is
+  ready), vinit stops every running service that `requires` it,
+  transitively. Those services keep `want`. They start again when the
+  service is ready again, and they fail if it fails. Finished oneshots
+  and `after` dependents are not affected.
 
 ## Possible future work
 
 These are not planned. They are listed here so the decision can be made
 on purpose:
 
-- Stop dependents when a required service crashes.
 - Route service output to a logger service.
-- Resource limits.
+- Resource limits. Until then, wrap the command, for example
+  `command = /usr/bin/prlimit --nofile=65536 -- /usr/sbin/nginx`.
 - Run the tests in CI.

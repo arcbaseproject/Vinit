@@ -1,7 +1,11 @@
 /* Exercise PID 1's signalfd fallback without mounts or a PID namespace. */
 #define _GNU_SOURCE
 #include <poll.h>
+#include <unistd.h>
 static int test_poll(struct pollfd *, nfds_t, int);
+static ssize_t test_write(int, const void *, size_t);
+pid_t test_getpid(void);
+int test_chdir(const char *);
 #define main vinit_main
 #define getpid test_getpid
 #define signalfd test_signalfd
@@ -10,6 +14,7 @@ static int test_poll(struct pollfd *, nfds_t, int);
 #define chdir test_chdir
 #define reboot test_reboot
 #define poll test_poll
+#define write test_write
 #include "../src/vinit.c"
 #undef main
 #undef getpid
@@ -19,11 +24,25 @@ static int test_poll(struct pollfd *, nfds_t, int);
 #undef chdir
 #undef reboot
 #undef poll
+#undef write
 #include <assert.h>
 #include <setjmp.h>
 
 static jmp_buf done;
 static int readiness[2], ready_seen, child_seen, steps;
+static int log_test, log_polls, log_writes;
+
+static ssize_t test_write(int fd, const void *buf, size_t n)
+{
+	if (!log_test)
+		return write(fd, buf, n);
+	assert(fd == STDERR_FILENO);
+	assert(++log_writes <= 3);
+	if (log_test == 2)
+		return (ssize_t)n;
+	errno = EAGAIN;
+	return -1;
+}
 
 pid_t test_getpid(void) { return 1; }
 int test_signalfd(int fd, const sigset_t *set, int flags)
@@ -47,6 +66,12 @@ int test_chdir(const char *path) { (void)path; return 0; }
 int test_reboot(int how) { (void)how; return 0; }
 int test_poll(struct pollfd *fds, nfds_t n, int timeout)
 {
+	if (log_test) {
+		assert(n == 1 && timeout == LOG_WAIT_MS);
+		assert(++log_polls == 1);
+		fds[0].revents = POLLOUT;
+		return 1;
+	}
 	assert(timeout == 100);
 	return poll(fds, n, timeout);
 }
@@ -92,6 +117,20 @@ void control_handle(int fd) { (void)fd; assert(0); }
 int main(void)
 {
 	sigset_t saved;
+	/* A writable notification does not guarantee the next write succeeds. */
+	log_test = 1;
+	write_log("test", 4);
+	assert(log_polls == 1 && log_writes == 2);
+	write_log("test", 4); /* Stalled console: no further wait. */
+	assert(log_polls == 1 && log_writes == 3);
+	log_test = 2;
+	log_writes = 0;
+	write_log("test", 4); /* Successful output clears the stalled state. */
+	log_test = 1;
+	log_writes = log_polls = 0;
+	write_log("test", 4);
+	assert(log_polls == 1 && log_writes == 2);
+	log_test = 0;
 	assert(sigprocmask(SIG_SETMASK, NULL, &saved) == 0);
 	if (!setjmp(done))
 		vinit_main();

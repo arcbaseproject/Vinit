@@ -36,6 +36,7 @@ struct service {
 	int type, restart, delay_ms, limit, stop_timeout_ms;
 	int ready_fd;           /* fd number the service writes "\n" to when ready */
 	int ready_timeout_ms;   /* 0: wait forever */
+	int log_dep;            /* deps[] index of the log service, plus 1; 0: none */
 	struct dep deps[MAX_DEPS];
 	int ndeps;
 	char error[192]; /* set when the service is unusable; it never starts */
@@ -51,6 +52,7 @@ struct service {
 	int last_status;        /* wait status of the last exit */
 	int notify;             /* our end of the readiness pipe, or 0 */
 	int timed_out;          /* stopped for not becoming ready */
+	int logpipe[2];         /* held open while others log to us, or 0 */
 	long long started_at;
 	long long deadline;     /* restart time, or stop timeout */
 };
@@ -66,7 +68,7 @@ void config_resolve(struct service *svc, int n);
 struct pollfd;
 
 void services_load(const char *dir);
-int services_reload(const char *dir, char *msg, size_t len);
+int services_reload(const char *dir, long long now, char *msg, size_t len);
 int services_pollfds(struct pollfd *pfd);
 void services_poll_events(const struct pollfd *pfd, int n);
 long long services_step(long long now, int shutting_down);

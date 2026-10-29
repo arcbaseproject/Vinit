@@ -14,7 +14,7 @@ rm -rf build/ns-root
 cp -a "${1:-build/rootfs}" build/ns-root
 root=build/ns-root
 
-timeout 60 unshare --user --map-root-user \
+VINIT_LEAK=1 timeout 60 unshare --user --map-root-user \
 	--map-users=1:"$(awk -F: -v u="$(id -un)" '$1 == u { print $2 + 1 }' /etc/subuid)":65535 \
 	--map-groups=1:"$(awk -F: -v u="$(id -un)" '$1 == u { print $2 + 1 }' /etc/subgid)":65535 \
 	--pid --fork --mount --net --root="$root" /sbin/init >"$log" 2>&1

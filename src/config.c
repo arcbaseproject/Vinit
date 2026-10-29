@@ -25,7 +25,7 @@ enum {
 	K_NAME, K_COMMAND, K_TYPE, K_STOP_TIMEOUT, K_READY_FD, K_READY_TIMEOUT, K_CRITICAL,
 	K_POLICY, K_DELAY, K_LIMIT,
 	K_AFTER, K_REQUIRES,
-	K_USER, K_GROUP, K_WORKDIR, K_ENV, K_STDIN,
+	K_USER, K_GROUP, K_WORKDIR, K_ENV, K_STDIN, K_LOG,
 	NKEYS
 };
 
@@ -51,6 +51,7 @@ static const struct {
 	[K_WORKDIR]      = { SEC_EXEC,    "working_directory", 0 },
 	[K_ENV]          = { SEC_EXEC,    "env", 1 },
 	[K_STDIN]        = { SEC_EXEC,    "stdin", 0 },
+	[K_LOG]          = { SEC_EXEC,    "log", 0 },
 };
 
 static int fail(char *err, size_t len, const char *path, int line, const char *fmt, ...)
@@ -206,6 +207,8 @@ static const char *copy_name(char *dst, const char *val)
 
 static const char *apply(struct service *s, int k, char *val)
 {
+	const char *msg;
+
 	switch (k) {
 	case K_NAME:
 		return strcmp(val, s->name) ? "must match the file name" : NULL;
@@ -269,6 +272,15 @@ static const char *apply(struct service *s, int k, char *val)
 			s->stdin_console = 1;
 		else
 			return "must be null or console";
+		return NULL;
+	case K_LOG:
+		if (strpbrk(val, " \t"))
+			return "must be one service name";
+		if ((msg = add_deps(s, val, 0)))
+			return msg;
+		while (strcmp(s->deps[s->log_dep].name, val))
+			s->log_dep++;
+		s->log_dep++;
 		return NULL;
 	}
 	return "unhandled key";
@@ -429,7 +441,12 @@ void config_resolve(struct service *tab, int n)
 					dp->idx = j;
 			if (dp->idx < 0 && !tab[i].error[0])
 				snprintf(tab[i].error, sizeof tab[i].error, "%s '%s' is not a known service",
-					 dp->hard ? "requires" : "after", dp->name);
+					 tab[i].log_dep == d + 1 ? "log" : dp->hard ? "requires" : "after",
+					 dp->name);
+			else if (dp->idx >= 0 && tab[i].log_dep == d + 1 && tab[dp->idx].stdin_console &&
+				 !tab[i].error[0])
+				snprintf(tab[i].error, sizeof tab[i].error,
+					 "log service '%s' reads stdin from the console", dp->name);
 		}
 	}
 	/* Start a fresh search at every service: a completed branch can hide

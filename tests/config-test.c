@@ -168,6 +168,21 @@ int main(void)
 	CHECK(strcmp(tab[2].error, "dependency cycle: b -> a -> c -> b") == 0);
 	CHECK(tab[3].error[0] == '\0' && tab[3].deps[0].idx == 2);
 
+	/* log = X is an ordering dependency on X, which gets the output. */
+	bad("[service]\ncommand = /bin/true\n[execution]\nlog = a b\n", "must be one service name");
+	bad("[service]\ncommand = /bin/true\n[execution]\nlog = x\n", "cannot depend on itself");
+	CHECK(parse(&tab[0], "a.conf", "[service]\ncommand = /bin/true\n[dependencies]\nafter = c\n"
+		    "[execution]\nlog = b\n", 0644) == 0);
+	CHECK(tab[0].log_dep == 2 && !tab[0].deps[1].hard);
+	CHECK(parse(&tab[1], "b.conf", "[service]\ncommand = /bin/true\n", 0644) == 0);
+	CHECK(parse(&tab[2], "c.conf", "[service]\ncommand = /bin/true\n[execution]\nlog = d\n", 0644) == 0);
+	CHECK(parse(&tab[3], "d.conf", "[service]\ncommand = /bin/true\n[execution]\nstdin = console\n", 0644) == 0);
+	CHECK(parse(&tab[4], "e.conf", "[service]\ncommand = /bin/true\n[execution]\nlog = zz\n", 0644) == 0);
+	config_resolve(tab, 5);
+	CHECK(tab[0].error[0] == '\0' && tab[0].deps[1].idx == 1);
+	CHECK(strcmp(tab[2].error, "log service 'd' reads stdin from the console") == 0);
+	CHECK(strcmp(tab[4].error, "log 'zz' is not a known service") == 0);
+
 	{
 		char cmd[64];
 

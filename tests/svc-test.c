@@ -20,6 +20,8 @@
 #include <time.h>
 #include <unistd.h>
 
+extern char **environ;
+
 static const char *mode = "?";
 static int failed;
 
@@ -209,6 +211,13 @@ static void reload_tests(void)
 	write_file(SVC_DIR "missing.conf", "[service]\ncommand = /bin/svc-test daemon missing\n");
 	ctl(0, "0 added, 0 removed", "reload", NULL);
 	wait_state("missing", "running");
+
+	/* A changed running service restarts; the unchanged ones do not. */
+	write_file(SVC_DIR "base.conf", "[service]\ncommand = /bin/svc-test daemon base\n"
+		   "[execution]\nenv = CHANGED=1\n");
+	ctl(0, "0 added, 0 removed, 1 restarted", "reload", NULL);
+	wait_state("base", "running");
+	ctl(0, "state: running", "status", "app");
 }
 
 static int count_fds(void)
@@ -267,7 +276,7 @@ static void stress_tests(void)
 			kill(1, sig);
 	}
 	usleep(100000);
-	ctl(0, "up, 25 services", "status", NULL);
+	ctl(0, "up, 27 services", "status", NULL);
 
 	/* 50 clients at once must all get answers. */
 	for (int i = 0; i < 50; i++)
@@ -314,7 +323,7 @@ static void control_tests(void)
 	ctl(0, "state: running", "status", "base");
 	ctl(0, "state: failed", "status", "crashloop");
 	ctl(0, "last exit: signal 6 (Aborted)", "status", "crashloop");
-	ctl(0, "up, 25 services", "status", NULL);
+	ctl(0, "up, 27 services", "status", NULL);
 	ctl(0, "state: running", "status", "after-ready");
 	ctl(0, "state: failed", "status", "never-ready");
 	ctl(1, "unknown service 'nope'", "start", "nope");
@@ -562,6 +571,17 @@ int main(int argc, char **argv)
 		(void)!getcwd(cwd, sizeof cwd);
 		out("uid=%d gid=%d groups=%d", (int)getuid(), (int)getgid(), getgroups(0, NULL));
 		out("cwd=%s GREETING=%s", cwd, g ? g : "(unset)");
+		{
+			int n = 0;
+
+			for (char **e = environ; *e; e++)
+				if (strncmp(*e, "PATH=", 5) && strncmp(*e, "TERM=", 5) &&
+				    strncmp(*e, "GREETING=", 9)) {
+					out("unexpected environment: %s", *e);
+					n++;
+				}
+			out("other environment variables: %d", n);
+		}
 	} else if (strcmp(argv[1], "notify") == 0) {
 		usleep(500000);
 		fclose(fopen("/run/ready-slow.ready", "w"));
@@ -572,6 +592,16 @@ int main(int argc, char **argv)
 	} else if (strcmp(argv[1], "after-ready") == 0) {
 		out(stat("/run/ready-slow.ready", &st) == 0 ? "dependency was ready" :
 		    "FAIL started before its dependency was ready");
+		daemon_loop();
+	} else if (strcmp(argv[1], "logged") == 0) {
+		out("to stdout");
+		fprintf(stderr, "svc-test logged: to stderr\n");
+	} else if (strcmp(argv[1], "logsink") == 0) {
+		char line[256];
+
+		while (fgets(line, sizeof line, stdin))
+			out("got %.*s", (int)strcspn(line, "\n"), line);
+		out("FAIL stdin reached EOF");
 		daemon_loop();
 	} else if (strcmp(argv[1], "exit") == 0) {
 		return 0;

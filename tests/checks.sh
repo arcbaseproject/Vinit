@@ -50,21 +50,29 @@ run_checks() {
 	# privilege dropping, working directory, environment
 	check 'svc-test id: uid=65534 gid=65534 groups=1'
 	check 'svc-test id: cwd=/run GREETING=hello world'
+	check 'svc-test id: other environment variables: 0'
+
+	# log = X pipes stdout and stderr into X
+	check 'svc-test logsink: got svc-test logged: to stdout'
+	check 'svc-test logsink: got svc-test logged: to stderr'
 
 	# orphan reaping
 	check 'svc-test check: zombies after orphans exit: 0'
 	check 'svc-test check: PASS'
 
 	# no file descriptor leaks in PID 1 after all the spawns above
-	check 'svc-test check: PID 1 open fds: 5'
+	# (5 of its own, plus both ends of the logsink pipe)
+	check 'svc-test check: PID 1 open fds: 7'
 	check 'svc-test check: PID 1 CPU ticks during 3 s idle: 0 '
-	check 'svc-test check: PID 1 open fds after control tests: 5'
+	check 'svc-test check: PID 1 open fds after control tests: 7'
 
 	# control socket
 	check 'svc-test check: vinitctl stop base: ok'
 	check 'stop base requested by uid 0'
 	check 'svc-test check: app is running'
 	check 'stopped flaky, starting it again'
+	check 'reloaded: 0 added, 0 removed, 1 restarted'
+	check 'stopped base, starting it again'
 	check 'svc-test check: raw request -> ok: ok'
 	check 'poweroff requested by uid 0'
 
@@ -77,7 +85,7 @@ run_checks() {
 	# stress: process group cleanup, signals, concurrency, restart churn
 	check 'svc-test check: leaky child'
 	check 'svc-test check: 50 concurrent clients: ok'
-	check 'svc-test check: after 100 restarts: fds 5 -> 5'
+	check 'svc-test check: after 100 restarts: fds 7 -> 7'
 
 	# readiness notification
 	check 'ready-slow is ready'

@@ -49,6 +49,9 @@ test: test-unit rootfs
 test-qemu: initramfs
 	tests/run-qemu.sh build/initramfs.cpio.gz
 
+test-qemu-arm64:
+	sh tests/run-arm64.sh
+
 # Coverage-guided fuzzing of the parser and resolver; needs clang.
 FUZZ_TIME ?= 60
 fuzz: tests/fuzz-config.c src/config.c src/vinit.h
@@ -61,4 +64,4 @@ fuzz: tests/fuzz-config.c src/config.c src/vinit.h
 clean:
 	rm -rf vinit vinitctl tests/svc-test tests/config-test tests/service-test tests/event-test tests/client-test tests/fuzz-config build
 
-.PHONY: all rootfs initramfs test-unit test test-qemu fuzz clean
+.PHONY: all rootfs initramfs test-unit test test-qemu test-qemu-arm64 fuzz clean

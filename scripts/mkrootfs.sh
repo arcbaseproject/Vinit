@@ -4,12 +4,13 @@
 # creates /proc, /sys, /dev and /run itself.
 set -eu
 root=$1
+bin=${2:-.}
 rm -rf "$root"
 mkdir -p "$root/sbin" "$root/bin" "$root/etc/vinit/services"
-cp vinit "$root/sbin/init"
-cp vinitctl "$root/sbin/vinitctl"
-cp tests/svc-test "$root/bin/svc-test"
-cp tests/svc-test "$root/etc/vinit/shutdown"
+cp "$bin/vinit" "$root/sbin/init"
+cp "$bin/vinitctl" "$root/sbin/vinitctl"
+cp "$bin/tests/svc-test" "$root/bin/svc-test"
+cp "$bin/tests/svc-test" "$root/etc/vinit/shutdown"
 cp tests/services/*.conf "$root/etc/vinit/services/"
 chmod 0644 "$root"/etc/vinit/services/*.conf
 chmod 0666 "$root/etc/vinit/services/writable.conf"

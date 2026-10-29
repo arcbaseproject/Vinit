@@ -240,7 +240,8 @@ static int lookup_creds(const struct service *s, struct creds *c)
 	return 0;
 }
 
-static _Noreturn void child(const struct service *s, const struct creds *c, int errfd, int readyfd)
+static _Noreturn void child(const struct service *s, const struct creds *c, int errfd, int readyfd,
+			    int logfd)
 {
 	struct child_error ce;
 	sigset_t none;
@@ -250,6 +251,16 @@ static _Noreturn void child(const struct service *s, const struct creds *c, int 
 	sigemptyset(&none);
 	sigprocmask(SIG_SETMASK, &none, NULL);
 	setsid();
+	/* PID 1 may log through its own nonblocking, close-on-exec fd 2;
+	 * services get the blocking console from fd 1 instead. */
+	if (fcntl(2, F_GETFD) == FD_CLOEXEC)
+		dup2(1, 2);
+
+	ce.what = "log";
+	if (logfd >= 0 && (dup2(logfd, 1) < 0 || dup2(logfd, 2) < 0))
+		goto fail;
+	if (s->logpipe[0] && dup2(s->logpipe[0], 0) < 0)
+		goto fail;
 
 	if (s->ready_fd) {
 		/* Move the error pipe above ready_fd so dup2() cannot hit it. */
@@ -262,7 +273,7 @@ static _Noreturn void child(const struct service *s, const struct creds *c, int 
 			goto fail;
 	}
 
-	if (!s->stdin_console) {
+	if (!s->stdin_console && !s->logpipe[0]) {
 		/* Without /dev/null (no devtmpfs), a pipe with no writer also
 		 * reads as EOF. */
 		fd = open("/dev/null", O_RDONLY);
@@ -303,11 +314,40 @@ fail:
 }
 
 static void finished(struct service *s, int ok, long long now);
+static void stop_service(struct service *s, long long now);
+
+/* Service i went down on its own. Stop everything that requires it, and
+ * start it again once i is back, or fail it if i fails. */
+static void stop_dependents(int i, long long now)
+{
+	for (int j = 0; j < nsvc; j++) {
+		struct service *t = &svc[j];
+
+		if (!t->pid || !t->want || t->state == ST_STOPPING)
+			continue;
+		for (int d = 0; d < t->ndeps; d++)
+			if (t->deps[d].idx == i && t->deps[d].hard) {
+				say("%s requires %s, which went down", t->name, svc[i].name);
+				t->restarting = 1;
+				stop_service(t, now);
+				stop_dependents(j, now);
+				break;
+			}
+	}
+}
+
+/* PID 1 holds both ends, so neither side sees EOF or EPIPE while the
+ * other restarts, and buffered lines survive. */
+static int open_log_pipe(struct service *l)
+{
+	return l->logpipe[0] || pipe2(l->logpipe, O_CLOEXEC) == 0 ? 0 : -1;
+}
 
 static void start_service(struct service *s, long long now)
 {
 	struct child_error ce;
 	struct creds c;
+	struct service *l = NULL;
 	int pfd[2], rp[2] = { -1, -1 };
 	ssize_t r;
 	pid_t pid;
@@ -318,6 +358,12 @@ static void start_service(struct service *s, long long now)
 		finished(s, 0, now);
 		return;
 	}
+	for (int j = 0; j < nsvc; j++)
+		if (svc[j].log_dep && svc[j].deps[svc[j].log_dep - 1].idx == s - svc &&
+		    open_log_pipe(s) < 0)
+			goto fail;
+	if (s->log_dep && open_log_pipe(l = &svc[s->deps[s->log_dep - 1].idx]) < 0)
+		goto fail;
 	if (s->ready_fd && pipe2(rp, O_CLOEXEC) < 0)
 		goto fail;
 	if (pipe2(pfd, O_CLOEXEC) < 0)
@@ -328,7 +374,7 @@ static void start_service(struct service *s, long long now)
 		goto fail;
 	}
 	if (pid == 0)
-		child(s, &c, pfd[1], rp[1]);
+		child(s, &c, pfd[1], rp[1], l ? l->logpipe[1] : -1);
 	close(pfd[1]);
 	if (s->ready_fd) {
 		close(rp[1]);
@@ -403,12 +449,13 @@ static void finished(struct service *s, int ok, long long now)
 		say("stopped %s", s->name);
 		return;
 	}
-	if (s->type == TYPE_ONESHOT && ok) {
+	if (s->type == TYPE_ONESHOT && ok && s->restart != RESTART_ALWAYS) {
 		s->state = ST_RUNNING; /* done; dependents may start */
 		s->failures = 0;
 		say("finished %s", s->name);
 		return;
 	}
+	stop_dependents((int)(s - svc), now);
 	if (s->restart == RESTART_ALWAYS || (s->restart == RESTART_ON_FAILURE && !ok)) {
 		if (now - s->started_at >= HEALTHY_MS)
 			s->failures = 0;
@@ -740,18 +787,33 @@ static int find_in(const struct service *tab, int n, const char *name)
 	return -1;
 }
 
+/* Both tables come from config_parse(), which zeroes each entry first, so
+ * memcmp() is safe. argv and dependency indices differ between tables. */
+static int same_config(const struct service *a, const struct service *b)
+{
+	if (memcmp(a, b, offsetof(struct service, argv)) ||
+	    memcmp(a->env, b->env, offsetof(struct service, deps) - offsetof(struct service, env)) ||
+	    a->ndeps != b->ndeps)
+		return 0;
+	for (int d = 0; d < a->ndeps; d++)
+		if (strcmp(a->deps[d].name, b->deps[d].name) || a->deps[d].hard != b->deps[d].hard)
+			return 0;
+	return 1;
+}
+
 /* Re-read the service files. The reload is refused, and nothing changes,
  * if it would break a service that works now, or remove one that is still
- * active. New definitions of running services apply at their next start.
- * Returns 0 on success; msg gets the result either way. */
-int services_reload(const char *dir, char *msg, size_t len)
+ * active. Running services whose definition changed restart; their
+ * dependents keep running. Returns 0 on success; msg gets the result
+ * either way. */
+int services_reload(const char *dir, long long now, char *msg, size_t len)
 {
 	const size_t runtime = offsetof(struct service, state);
 	/* A temporary mapping, so the idle RSS of PID 1 does not grow by a
 	 * second service table after the first reload. */
 	struct service *next = mmap(NULL, sizeof svc, PROT_READ | PROT_WRITE,
 				    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	int n, added = 0, removed = 0, r = -1;
+	int n, added = 0, removed = 0, restarted = 0, r = -1;
 
 	if (next == MAP_FAILED) {
 		snprintf(msg, len, "%s", strerror(errno));
@@ -792,6 +854,11 @@ int services_reload(const char *dir, char *msg, size_t len)
 		}
 		memcpy((char *)&next[j] + runtime, (const char *)&svc[i] + runtime,
 		       sizeof next[j] - runtime);
+		if (!same_config(&svc[i], &next[j]) && next[j].pid && next[j].want &&
+		    (next[j].state == ST_STARTING || next[j].state == ST_RUNNING)) {
+			next[j].restarting = 1;
+			restarted++;
+		}
 		if (next[j].type == TYPE_SIMPLE && next[j].state == ST_RUNNING && !next[j].pid) {
 			/* A finished oneshot that is now simple: nothing runs, so
 			 * it must not count as up. Start it. */
@@ -814,11 +881,19 @@ int services_reload(const char *dir, char *msg, size_t len)
 		if (svc[i].builtin && (svc[i].want || svc[i].pid))
 			copy_service(&next[n++], &svc[i]);
 
-	for (int j = 0; j < n; j++)
+	for (int i = 0; i < nsvc; i++)
+		if (svc[i].logpipe[0] && find_in(next, n, svc[i].name) < 0) {
+			close(svc[i].logpipe[0]);
+			close(svc[i].logpipe[1]);
+		}
+
+	for (int j = 0; j < n; j++) {
 		copy_service(&svc[j], &next[j]);
+		if (svc[j].restarting && svc[j].state != ST_STOPPING)
+			stop_service(&svc[j], now);
+	}
 	nsvc = n;
-	snprintf(msg, len, "%d added, %d removed; running services use a new definition "
-		 "from their next start", added, removed);
+	snprintf(msg, len, "%d added, %d removed, %d restarted", added, removed, restarted);
 	say("reloaded: %s", msg);
 	r = 0;
 out:

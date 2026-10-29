@@ -10,7 +10,7 @@ It is **not** an independent audit.
 | `/etc/vinit/services/*.conf`  | root                   | The directory and each file must be owned by root and not writable by group or others; otherwise vinit ignores them. The parser is strict, and it is fuzzed. |
 | Control socket requests       | any local user         | Kernel-verified credentials (`SO_PASSCRED`). Only uid 0 may change state. Requests are printable ASCII, at most 255 bytes. Any passed fds are closed. At most 16 requests are handled per wakeup. |
 | Readiness pipe data           | the service            | Only a newline has meaning. At most 16 reads per wakeup. The pipe closes after readiness. |
-| Kernel command line           | bootloader             | Only the `vinit.quiet` token is read. `KEY=value` entries reach vinit's environment through the kernel and are passed on to services. |
+| Kernel command line           | bootloader             | Only the `vinit.quiet` token is read. `KEY=value` entries reach vinit's environment through the kernel. vinit clears its environment at boot, except `TERM`, and sets `PATH`. |
 | Signals to PID 1              | root (or the kernel)   | All signals are blocked and read from a signalfd. Signals without an action are ignored. This is tested for all catchable signals. |
 | `/etc/passwd`, `/etc/group`   | root                   | Read with `fgetpwent()`/`fgetgrent()`. NSS is never loaded into PID 1. |
 
@@ -66,9 +66,11 @@ It is **not** an independent audit.
 
 ## Known gaps
 
-- **Console writes can block PID 1.** Logging uses blocking `write()` to
-  the console. A stalled serial console stalls PID 1. s6 and runit have
-  the same property.
+- **Lost log lines.** When the console is a terminal, vinit logs through
+  a nonblocking fd. It waits at most 1 s for a busy console, then drops
+  lines until the console drains. On a stalled serial console, failures
+  can go unreported. When the console is not a terminal (for example a
+  pipe from a container runtime), writes still block.
 - **No sandboxing.** There are no cgroups, namespaces, seccomp, resource
   limits or capability bounding for services. Isolation is only the
   uid/gid switch. `PR_SET_NO_NEW_PRIVS` is not set, because that would
@@ -80,8 +82,5 @@ It is **not** an independent audit.
   `setpgid()` in its children escapes its process group. Those processes
   are only killed at the final `kill(-1)` during shutdown. Only cgroups
   would close this gap.
-- **Environment from the kernel command line.** It reaches services
-  unfiltered.
-- **Untested checks.** The services-directory permission check has been
-  reviewed but has no integration test.
-- **Single architecture.** Only x86_64 with Linux 6.18 has been tested.
+- **Hardware coverage.** x86_64 and ARM64 passed the normal and quiet QEMU
+  boot/shutdown suites with Linux 6.18.59. Real hardware remains untested.

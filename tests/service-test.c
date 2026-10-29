@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -101,7 +102,7 @@ static void reload_completed_oneshot(void)
 	snprintf(path, sizeof path, "%s/job.conf", dir);
 	f = fopen(path, "w");
 	assert(f);
-	fputs("[service]\ncommand = /bin/true\ntype = oneshot\n", f);
+	fputs("[service]\ncommand = /bin/sh -c true\ntype = oneshot\n", f);
 	assert(fclose(f) == 0);
 	memset(svc, 0, sizeof svc);
 	services_load(dir);
@@ -109,9 +110,9 @@ static void reload_completed_oneshot(void)
 	svc[0].state = ST_RUNNING; /* A successfully completed oneshot. */
 	f = fopen(path, "w");
 	assert(f);
-	fputs("[service]\ncommand = /bin/true\ntype = simple\n", f);
+	fputs("[service]\ncommand = /bin/sh -c true\ntype = simple\n", f);
 	assert(fclose(f) == 0);
-	assert(services_reload(dir, msg, sizeof msg) == 0);
+	assert(services_reload(dir, 1000, msg, sizeof msg) == 0);
 	assert(svc[0].type == TYPE_SIMPLE);
 	assert(service_restart(0, 1000) == NULL);
 	assert(svc[0].state == ST_INACTIVE && svc[0].want);
@@ -126,11 +127,199 @@ static void reload_completed_oneshot(void)
 	assert(rmdir(dir) == 0);
 }
 
+static pid_t sleeper(void)
+{
+	pid_t pid = fork();
+
+	assert(pid >= 0);
+	if (!pid) {
+		setsid();
+		for (;;)
+			pause();
+	}
+	return pid;
+}
+
+static void reap_until_gone(struct service *s)
+{
+	for (int i = 0; s->pid && i < 1000; i++) {
+		reap_children(0);
+		usleep(1000);
+	}
+	assert(!s->pid);
+}
+
+/* A required service that crashes takes its dependents down with it. They
+ * start again once it is back, and fail if it fails. */
+static void requirement_goes_down(void)
+{
+	memset(svc, 0, sizeof svc);
+	nsvc = 2;
+	strcpy(svc[0].name, "base");
+	strcpy(svc[1].name, "app");
+	strcpy(svc[1].deps[0].name, "base");
+	svc[1].deps[0].hard = 1;
+	svc[1].ndeps = 1;
+	config_resolve(svc, nsvc);
+	for (int i = 0; i < nsvc; i++) {
+		svc[i].pid = sleeper();
+		svc[i].state = ST_RUNNING;
+		svc[i].want = 1;
+		svc[i].stop_timeout_ms = 1000;
+	}
+	svc[0].restart = RESTART_ON_FAILURE;
+	svc[0].delay_ms = 1000;
+
+	kill(svc[0].pid, SIGKILL);
+	reap_until_gone(&svc[0]);
+	assert(svc[0].state == ST_INACTIVE && svc[0].want);
+	assert(svc[1].state == ST_STOPPING && svc[1].restarting);
+	reap_until_gone(&svc[1]);
+	assert(svc[1].state == ST_INACTIVE && svc[1].want);
+	services_step(500, 0); /* base restarts at 1000; app waits for it */
+	assert(!svc[1].pid && svc[1].state == ST_INACTIVE);
+
+	svc[0].state = ST_FAILED; /* base gives up */
+	svc[0].want = 0;
+	services_step(500, 0);
+	assert(svc[1].state == ST_FAILED);
+}
+
+/* Whoever can write the services directory could add root services. */
+static void unsafe_service_dir(void)
+{
+	char dir[] = "/tmp/vinit-service-test.XXXXXX";
+	char path[256];
+	FILE *f;
+
+	assert(mkdtemp(dir));
+	snprintf(path, sizeof path, "%s/job.conf", dir);
+	f = fopen(path, "w");
+	assert(f);
+	fputs("[service]\ncommand = /bin/sh -c true\n", f);
+	assert(fclose(f) == 0);
+	assert(chmod(dir, 0777) == 0);
+	memset(svc, 0, sizeof svc);
+	services_load(dir);
+	assert(nsvc == 1 && svc[0].builtin);
+	assert(chmod(dir, 0755) == 0);
+	memset(svc, 0, sizeof svc);
+	services_load(dir);
+	assert(nsvc == 1 && !svc[0].builtin);
+	assert(unlink(path) == 0);
+	assert(rmdir(dir) == 0);
+}
+
+static void put(const char *dir, const char *name, const char *text)
+{
+	char path[256];
+	FILE *f;
+
+	snprintf(path, sizeof path, "%s/%s", dir, name);
+	f = fopen(path, "w");
+	assert(f);
+	fputs(text, f);
+	assert(fclose(f) == 0);
+}
+
+/* A successful oneshot repeats only with policy = always, using backoff. */
+static void oneshot_restart_always(void)
+{
+	char dir[] = "/tmp/vinit-service-test.XXXXXX";
+	char path[256];
+
+	assert(mkdtemp(dir));
+	put(dir, "job.conf", "[service]\ncommand = /bin/sh -c true\ntype = oneshot\n"
+	    "[restart]\npolicy = always\ndelay_ms = 100\nlimit = 1\n");
+	memset(svc, 0, sizeof svc);
+	services_load(dir);
+	services_step(0, 0);
+	reap_until_gone(&svc[0]);
+	assert(svc[0].state == ST_INACTIVE && svc[0].want);
+	assert(svc[0].failures == 1 && svc[0].deadline == 100);
+	services_step(99, 0);
+	assert(!svc[0].pid);
+	services_step(100, 0);
+	assert(svc[0].pid);
+	reap_until_gone(&svc[0]);
+	assert(svc[0].state == ST_FAILED && !svc[0].want);
+	snprintf(path, sizeof path, "%s/job.conf", dir);
+	assert(unlink(path) == 0);
+	assert(rmdir(dir) == 0);
+}
+
+/* A changed running service restarts on reload; an unchanged one does not. */
+static void reload_restarts_changed(void)
+{
+	char dir[] = "/tmp/vinit-service-test.XXXXXX";
+	char msg[256], cmd[64];
+
+	assert(mkdtemp(dir));
+	put(dir, "a.conf", "[service]\ncommand = /bin/sh -c \"exec sleep 100\"\n");
+	put(dir, "b.conf", "[service]\ncommand = /bin/sh -c \"exec sleep 100\"\n");
+	memset(svc, 0, sizeof svc);
+	services_load(dir);
+	services_step(0, 0);
+	assert(svc[0].state == ST_RUNNING && svc[1].state == ST_RUNNING);
+	put(dir, "b.conf", "[service]\ncommand = /bin/sh -c \"exec sleep 200\"\n");
+	assert(services_reload(dir, 0, msg, sizeof msg) == 0);
+	assert(strcmp(msg, "0 added, 0 removed, 1 restarted") == 0);
+	assert(svc[0].state == ST_RUNNING);
+	assert(svc[1].state == ST_STOPPING && svc[1].restarting);
+	reap_until_gone(&svc[1]);
+	services_step(0, 0);
+	assert(svc[1].state == ST_RUNNING && svc[1].pid);
+	service_stop(0);
+	service_stop(1);
+	services_step(0, 0);
+	reap_until_gone(&svc[0]);
+	reap_until_gone(&svc[1]);
+	snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+	(void)!system(cmd);
+}
+
+/* Output of a service with log = X reaches X's stdin. */
+static void log_pipe(void)
+{
+	char dir[] = "/tmp/vinit-service-test.XXXXXX";
+	char text[256], out[256] = "", cmd[64];
+	FILE *f;
+
+	assert(mkdtemp(dir));
+	put(dir, "app.conf", "[service]\ncommand = /bin/sh -c \"echo hello; echo world >&2\"\n"
+	    "type = oneshot\n[execution]\nlog = logger\n");
+	snprintf(text, sizeof text, "[service]\ncommand = /bin/sh -c \"head -n2 > %s/out\"\n", dir);
+	put(dir, "logger.conf", text);
+	memset(svc, 0, sizeof svc);
+	services_load(dir);
+	for (int i = 0; i < 1000 && (svc[0].state != ST_RUNNING || svc[1].want); i++) {
+		services_step(0, 0);
+		reap_children(0);
+		usleep(1000);
+	}
+	assert(svc[0].state == ST_RUNNING && svc[1].state == ST_INACTIVE);
+	snprintf(text, sizeof text, "%s/out", dir);
+	f = fopen(text, "r");
+	assert(f);
+	assert(fread(out, 1, sizeof out - 1, f) == 12);
+	fclose(f);
+	assert(strcmp(out, "hello\nworld\n") == 0);
+	close(svc[1].logpipe[0]);
+	close(svc[1].logpipe[1]);
+	snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+	(void)!system(cmd);
+}
+
 int main(void)
 {
 	shared_dependencies();
 	readiness_eof();
 	reload_completed_oneshot();
+	requirement_goes_down();
+	unsafe_service_dir();
+	oneshot_restart_always();
+	reload_restarts_changed();
+	log_pipe();
 	puts("service test: PASS");
 	return 0;
 }

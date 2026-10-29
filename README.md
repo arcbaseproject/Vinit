@@ -33,6 +33,9 @@ See [docs/architecture.md](docs/architecture.md) for the design.
 
 ## Build
 
+Nix/NixOS users: see [nix/README.md](nix/README.md) for the package and
+NixOS service module, which runs Vinit alongside systemd.
+
 ```sh
 make                       # static ./vinit and ./vinitctl
 make clean all CC=musl-gcc # musl build (clean first: make does not track CC)
@@ -74,6 +77,7 @@ group = sshd                    # overrides the user's primary group
 working_directory = /
 env = LANG=C.UTF-8              # may be repeated
 stdin = null                    # null (default) | console
+log = sshd-log                  # optional: send stdout and stderr to this service
 ```
 
 The `#` comments above are for explanation only. In a real file, comments
@@ -103,6 +107,8 @@ quotes are rejected. If a service needs a shell, write
   dependency is ready once it has been executed. A `oneshot` dependency is
   ready once it has exited with status 0.
 - If the dependency fails, the service fails too.
+- If the dependency exits later on its own, vinit stops the service too.
+  The service starts again when the dependency is ready again.
 - `requires` also implies ordering.
 
 **Readiness.** Without `ready_fd`, a `simple` service counts as ready as
@@ -123,6 +129,8 @@ dependency, and logs the cycle path. It also rejects names of services that
 do not exist.
 
 **Restarts:**
+- `policy = always` also repeats successful oneshots, with the same backoff
+  and restart limit. Between runs they are not ready for dependents.
 - The delay doubles after each consecutive restart, up to 60 s.
 - A run that lasts 10 s or more resets the restart count.
 - When the process of a `simple` service exits, vinit kills the rest of
@@ -172,9 +180,9 @@ the reload, and changes nothing, in these cases:
 - It would remove a service that is still active. Stop the service first.
 
 When the reload goes through, new services start and services that had a
-config error and are now fixed start too. Running services keep running.
-Their new definition applies when they next start, for example after
-`vinitctl restart`.
+config error and are now fixed start too. Running services whose
+definition changed restart, as with `vinitctl restart`: their dependents
+keep running. Unchanged services keep running.
 
 The exit status is 0 on success, 1 when vinit reports an error, and 2 for
 usage or connection errors.
@@ -183,7 +191,30 @@ usage or connection errors.
 
 vinit writes `vinit: ...` lines to the console. Add `vinit.quiet` to the
 kernel command line to show only warnings and errors: failures, crashes,
-config errors and timeouts. Services write to the console directly.
+config errors and timeouts. Services write to the console directly,
+unless they set `log`. If the console is stalled for more than 1 s, vinit
+drops its own log lines until the console accepts writes again. Services
+still block.
+
+`log = X` sends the service's stdout and stderr through a pipe to the
+stdin of service `X`, as runit's log services do. A logger such as
+`svlogd` handles files and rotation:
+
+```ini
+# /etc/vinit/services/sshd-log.conf
+[service]
+command = /usr/bin/svlogd -tt /var/log/sshd
+```
+
+vinit holds both ends of the pipe, so no output is lost when either side
+restarts. `log` also implies `after = X`. Several services may log to the
+same `X`. If `X` stops reading, the pipe fills (64 KiB on Linux), and
+then the services that log to it block. `X` must not use
+`stdin = console`.
+
+Services get only `PATH`, `TERM` and their own `env` lines in their
+environment. vinit drops other variables, such as `KEY=value` words from
+the kernel command line.
 
 ### Signals to PID 1
 
@@ -253,6 +284,19 @@ make CC=musl-gcc test test-qemu
 It does not work inside a Flatpak sandbox. `make test-qemu` uses the host
 kernel by default. To use another kernel, set `KERNEL=/path/to/bzImage`.
 
+The same boot and shutdown checks also run under ARM64 QEMU emulation.
+Install `qemu-system-aarch64`, supply an AArch64 Linux compiler with static
+libc and an uncompressed ARM64 kernel `Image`, then run:
+
+```sh
+make test-qemu-arm64 \
+  ARM64_CC=/path/to/aarch64-linux-musl-gcc \
+  ARM64_KERNEL=/path/to/Image
+```
+
+This builds into `build/arm64` without replacing the host-architecture
+binaries. Logs are `build/arm64/qemu.log` and `qemu-quiet.log`.
+
 Both integration tests boot `build/rootfs`. In it, the services from
 [tests/services](tests/services) run [tests/svc-test.c](tests/svc-test.c),
 and [tests/checks.sh](tests/checks.sh) checks the boot log:
@@ -297,15 +341,13 @@ executions under ASan and UBSan, with no crash and no contract violation.
 
 ## Known limitations
 
-- If a required dependency crashes later, its dependents keep running.
-- A reload does not restart running services whose definition changed.
 - `type = forking` (daemons that background themselves) is not supported.
   Run daemons in the foreground.
-- `restart = always` on a oneshot restarts it only on failure.
-- Services write to the console. There is no log routing.
+- There are no per-service resource limits. Wrap the command with
+  `prlimit` (util-linux) or `chpst -o` (runit) instead.
 - The console is never a controlling terminal, so shells started on it
   have no job control. Use a getty on a real tty for that.
-- Only x86_64 has been tested.
+- x86_64 and ARM64 have passed QEMU boot tests; real hardware remains untested.
 - See [docs/security.md](docs/security.md) for security gaps.
 
 ## License

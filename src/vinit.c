@@ -40,12 +40,41 @@
 #define TERM_TIMEOUT_MS      5000 /* grace period after SIGTERM to all */
 #define KILL_TIMEOUT_MS      2000
 #define HOOK_TIMEOUT_MS    120000
+#define LOG_WAIT_MS          1000 /* longest wait for a busy console per line */
 #define SHUTDOWN_HOOK  "/etc/vinit/shutdown"
 
 int shutdown_how; /* 0, or the reboot() command to finish with */
 static long long shutdown_deadline;
 
 static int quiet; /* "vinit.quiet" on the kernel command line */
+
+/* fd 2 may be nonblocking (see nonblocking_log()). Wait a while for a
+ * busy console. Once it is stalled, drop lines until a write gets
+ * through again. */
+static void write_log(const char *buf, size_t n)
+{
+	static int stalled;
+	struct pollfd p = { .fd = STDERR_FILENO, .events = POLLOUT };
+	int waited = stalled;
+	ssize_t w;
+
+	while (n > 0) {
+		if ((w = write(STDERR_FILENO, buf, n)) > 0) {
+			buf += w;
+			n -= (size_t)w;
+			stalled = 0;
+			continue;
+		}
+		if (w < 0 && errno == EAGAIN && !waited) {
+			waited = 1;
+			if (poll(&p, 1, LOG_WAIT_MS) > 0)
+				continue;
+		}
+		if (w < 0 && errno == EAGAIN)
+			stalled = 1;
+		return;
+	}
+}
 
 /* One write() per message so lines from concurrent processes do not mix. */
 static void vlog(const char *fmt, va_list ap)
@@ -59,7 +88,7 @@ static void vlog(const char *fmt, va_list ap)
 		return;
 	n += (size_t)r < sizeof buf - n - 1 ? (size_t)r : sizeof buf - n - 2;
 	buf[n++] = '\n';
-	(void)!write(STDERR_FILENO, buf, n);
+	write_log(buf, n);
 }
 
 void say(const char *fmt, ...)
@@ -140,6 +169,14 @@ static void mount_api_filesystems(void)
 		{ "devtmpfs", "/dev",     "mode=0755",        MS_NOSUID },
 		{ "devpts",   "/dev/pts", "gid=5,mode=0620",  MS_NOSUID | MS_NOEXEC },
 		{ "tmpfs",    "/run",     "mode=0755",        MS_NOSUID | MS_NODEV },
+		{ "tmpfs",    "/dev/shm", "mode=1777",        MS_NOSUID | MS_NODEV },
+	};
+	/* devtmpfs does not create these; bash needs /dev/fd for <(...). */
+	static const char *const links[][2] = {
+		{ "/proc/self/fd",   "/dev/fd" },
+		{ "/proc/self/fd/0", "/dev/stdin" },
+		{ "/proc/self/fd/1", "/dev/stdout" },
+		{ "/proc/self/fd/2", "/dev/stderr" },
 	};
 
 	for (size_t i = 0; i < sizeof fs / sizeof fs[0]; i++) {
@@ -151,6 +188,8 @@ static void mount_api_filesystems(void)
 		if (mount(fs[i].type, fs[i].dir, fs[i].type, fs[i].flags, fs[i].data) < 0)
 			warn("mount %s on %s: %s", fs[i].type, fs[i].dir, strerror(errno));
 	}
+	for (size_t i = 0; i < sizeof links / sizeof links[0]; i++)
+		(void)!symlink(links[i][0], links[i][1]);
 }
 
 /* The kernel leaves fds 0-2 closed when the initramfs has no /dev/console.
@@ -174,6 +213,24 @@ static void setup_stdio(void)
 			dup2(fd, i);
 	if (fd > 2)
 		close(fd);
+}
+
+/* A stalled serial console must not stall PID 1. When stdout and stderr
+ * are the same terminal, log through a separate nonblocking open of it on
+ * fd 2 (see write_log()). fd 2 is close-on-exec, so
+ * children put the blocking fd 1 back as their fd 2. */
+static void nonblocking_log(void)
+{
+	struct stat out, err;
+	int fd;
+
+	if (!isatty(2) || fstat(1, &out) < 0 || fstat(2, &err) < 0 || out.st_rdev != err.st_rdev)
+		return;
+	fd = open("/proc/self/fd/2", O_WRONLY | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0)
+		return;
+	dup3(fd, 2, O_CLOEXEC);
+	close(fd);
 }
 
 /* Returns 1 when all children are gone, 0 on timeout. A SIGCHLD that
@@ -215,6 +272,8 @@ static void run_shutdown_hook(const sigset_t *chld, const char *what)
 
 		sigemptyset(&none);
 		sigprocmask(SIG_SETMASK, &none, NULL);
+		if (fcntl(2, F_GETFD) == FD_CLOEXEC)
+			dup2(1, 2); /* the blocking console, see nonblocking_log() */
 		execl(SHUTDOWN_HOOK, SHUTDOWN_HOOK, what, (char *)NULL);
 		warn("exec %s: %s", SHUTDOWN_HOOK, strerror(errno));
 		_exit(127);
@@ -386,6 +445,7 @@ int main(void)
 	int sfd, cfd, nready;
 	sigset_t all;
 	siginfo_t si;
+	char *term;
 
 	if (getpid() != 1) {
 		fprintf(stderr, "vinit: must run as PID 1\n");
@@ -403,10 +463,18 @@ int main(void)
 	umask(022);
 	if (chdir("/") < 0)
 		warn("chdir /: %s", strerror(errno));
-	setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 0);
+	/* The kernel passes unknown command line words with '=' as
+	 * environment. Services get only PATH, TERM and their own env lines.
+	 * clearenv() drops the array but not the strings, so term stays valid. */
+	term = getenv("TERM");
+	clearenv();
+	setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
+	if (term)
+		setenv("TERM", term, 1);
 
 	mount_api_filesystems();
 	setup_stdio();
+	nonblocking_log();
 	read_cmdline();
 	say("booting");
 

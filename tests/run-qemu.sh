@@ -4,20 +4,36 @@
 set -u
 initrd=${1:-build/initramfs.cpio.gz}
 kernel=${KERNEL:-/boot/vmlinuz-$(uname -r)}
-log=build/qemu.log
+out=${QEMU_LOG_DIR:-build}
+log=$out/qemu.log
 
 accel=
-[ -w /dev/kvm ] && accel="-enable-kvm -cpu host"
+case ${QEMU_ARCH:-x86_64} in
+x86_64)
+	qemu=qemu-system-x86_64
+	console=ttyS0
+	memory=128M
+	[ -w /dev/kvm ] && accel="-enable-kvm -cpu host"
+	;;
+aarch64)
+	qemu=qemu-system-aarch64
+	console=ttyAMA0
+	memory=256M
+	accel="-machine virt -cpu cortex-a57"
+	;;
+*) echo "unsupported QEMU_ARCH" >&2; exit 2 ;;
+esac
 
 # panic=-1 plus -no-reboot turns a PID 1 crash into a QEMU exit, not a hang.
 boot() {
-	timeout 120 qemu-system-x86_64 $accel -m 128M -nographic -no-reboot -audio none \
+	timeout 120 "$qemu" $accel -m "$memory" -nographic -no-reboot -audio none \
 		-kernel "$kernel" -initrd "$initrd" \
-		-append "console=ttyS0 rdinit=/sbin/init panic=-1 loglevel=4 $1" \
+		-append "console=$console rdinit=/sbin/init panic=-1 loglevel=4 $1" \
 		</dev/null >"$2" 2>&1
 }
 
-boot "" "$log"
+# VINIT_LEAK must not reach services (see the environment check).
+boot VINIT_LEAK=1 "$log"
 status=$?
 cat "$log"
 
@@ -41,7 +57,7 @@ fi
 [ "$status" -eq 0 ] || { echo "FAIL: qemu exit status $status"; fail=1; }
 
 # vinit.quiet hides routine messages but keeps warnings.
-qlog=build/qemu-quiet.log
+qlog=$out/qemu-quiet.log
 boot vinit.quiet "$qlog"
 if grep -qF 'vinit: booting' "$qlog" || grep -qF 'vinit: started base' "$qlog"; then
 	echo "FAIL: vinit.quiet printed routine messages"

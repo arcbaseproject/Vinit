@@ -221,7 +221,7 @@ static void handle_request(struct reply *r, char *req, const struct ucred *cred)
 	case C_RELOAD: {
 		static char msg[256];
 
-		if (services_reload(SERVICE_DIR, msg, sizeof msg) < 0)
+		if (services_reload(SERVICE_DIR, now_ms(), msg, sizeof msg) < 0)
 			err = msg;
 		else
 			add(r, "ok\n%s\n", msg);
