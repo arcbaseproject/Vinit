@@ -9,8 +9,7 @@ maintainer="arcbaseproject <stormz5m@proton.me>"
 license="MIT"
 homepage="https://github.com/arcbaseproject/Vinit"
 distfiles="https://github.com/arcbaseproject/Vinit/archive/refs/tags/v${version}.tar.gz"
-# Fill in after the v0.2.0 tag exists: xgensum -i vinit
-checksum=0000000000000000000000000000000000000000000000000000000000000000
+checksum=a5e476fcc94ca3856afa8eed357eb2704c6bc684f3d88eda9b90bea054e22571
 
 post_install() {
 	vlicense LICENSE

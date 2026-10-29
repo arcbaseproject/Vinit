@@ -10,8 +10,7 @@ depends=('glibc')
 optdepends=('python: unit2vinit, to convert systemd units')
 checkdepends=('python')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# Fill in after the v0.2.0 tag exists: updpkgsums
-sha256sums=('SKIP')
+sha256sums=('a5e476fcc94ca3856afa8eed357eb2704c6bc684f3d88eda9b90bea054e22571')
 
 build() {
 	cd "Vinit-$pkgver"
