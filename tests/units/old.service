@@ -1,0 +1,4 @@
+[Service]
+Type=forking
+ExecStart=/usr/sbin/olddaemon
+PIDFile=/run/old.pid

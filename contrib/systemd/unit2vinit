@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""Convert systemd .service units to vinit service files.
+
+Usage: unit2vinit [-o DIR] UNIT.service...
+
+Without -o, the result goes to standard output. With -o, each unit
+becomes DIR/<name>.conf, with mode 0644. Review the result before you
+use it: systemd has many settings that vinit does not have. Each
+setting that is not converted is listed in a comment at the top of the
+file and on standard error. The exit status is 1 if a unit could not be
+converted, for example because it has Type=forking.
+"""
+import os
+import re
+import shlex
+import sys
+
+NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]*$")
+SHELL_CHARS = set("'`$|;&<>\\")
+TIME_UNITS = {
+    "us": 0.001, "usec": 0.001,
+    "ms": 1, "msec": 1,
+    "": 1000, "s": 1000, "sec": 1000, "second": 1000, "seconds": 1000,
+    "m": 60000, "min": 60000, "minute": 60000, "minutes": 60000,
+    "h": 3600000, "hr": 3600000, "hour": 3600000, "hours": 3600000,
+}
+# vinit caps every time value at one hour.
+MAX_MS = 3600000
+
+
+class Unconvertible(Exception):
+    pass
+
+
+def parse_unit(text):
+    """Return {section: [(key, value), ...]}, keeping repeated keys."""
+    sections = {}
+    current = None
+    pending = ""
+    for raw in text.splitlines():
+        line = pending + raw.strip() if pending else raw.strip()
+        pending = ""
+        if line.endswith("\\"):
+            pending = line[:-1].rstrip() + " "
+            continue
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = sections.setdefault(line[1:-1].strip(), [])
+            continue
+        if "=" not in line or current is None:
+            continue
+        key, value = line.split("=", 1)
+        current.append((key.strip(), value.strip()))
+    return sections
+
+
+def parse_time(value):
+    """systemd time span, such as "90", "1min 30s" or "500ms", in ms."""
+    if value == "infinity":
+        return 0
+    if not re.fullmatch(r"(\s*\d+(\.\d+)?\s*[a-z]*)+\s*", value):
+        raise ValueError("bad time span %r" % value)
+    total = 0.0
+    for num, unit in re.findall(r"(\d+(?:\.\d+)?)\s*([a-z]*)", value):
+        if unit not in TIME_UNITS:
+            raise ValueError("bad time unit in %r" % value)
+        total += float(num) * TIME_UNITS[unit]
+    return int(total)
+
+
+def strip_exec_prefix(cmd, notes):
+    """Remove systemd's command prefixes: - @ : + !
+    Return the command and whether its failure is ignored ("-")."""
+    ignore = False
+    while cmd and cmd[0] in "-@:+!":
+        if cmd[0] == "-":
+            ignore = True
+        elif cmd[0] == "@":
+            notes.append("'@' prefix (custom argv[0]) is not supported; check the command")
+        elif cmd[0] in "+!":
+            notes.append("'%s' prefix (run with full privileges) dropped" % cmd[0])
+        cmd = cmd[1:]
+    return cmd, ignore
+
+
+def needs_shell(cmd):
+    """True if vinit's command splitter would reject cmd."""
+    in_quote = False
+    i = 0
+    while i < len(cmd):
+        c = cmd[i]
+        if in_quote:
+            if c == "\\" and i + 1 < len(cmd) and cmd[i + 1] in '"\\':
+                i += 1
+            elif c == '"':
+                in_quote = False
+        elif c == '"':
+            in_quote = True
+        elif c in SHELL_CHARS:
+            return True
+        i += 1
+    return in_quote
+
+
+def quote_for_vinit(s):
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def build_command(starts, pres, notes):
+    """One vinit command from ExecStartPre= and ExecStart= lines."""
+    starts = [strip_exec_prefix(c, notes) for c in starts]
+    pres = [strip_exec_prefix(c, notes) for c in pres]
+    if starts[-1][1]:
+        notes.append("'-' prefix (ignore failure) dropped from ExecStart=")
+    # "a || true && b" runs b even if a fails, as "-a" does in systemd.
+    starts = [c + " || true" if ign and i < len(starts) - 1 else c
+              for i, (c, ign) in enumerate(starts)]
+    pres = [c + " || true" if ign else c for c, ign in pres]
+    for c in starts + pres:
+        if re.search(r"%[a-zA-Z]", c):
+            notes.append("systemd specifier (%%x) in %r is not expanded" % c)
+    if len(starts) == 1 and not pres and not needs_shell(starts[0]):
+        cmd = starts[0]
+        if not cmd.startswith("/"):
+            notes.append("command %r is not an absolute path; vinit requires one" % cmd)
+        return cmd
+    # Several commands, or shell syntax: run them through /bin/sh. The
+    # last command replaces the shell, so vinit supervises it directly.
+    parts = pres + starts[:-1] + ["exec " + starts[-1]]
+    return "/bin/sh -c " + quote_for_vinit(" && ".join(parts))
+
+
+def strip_suffix(name, notes, key):
+    """foo.service -> foo; other unit types are dropped with a note."""
+    if name.endswith(".service"):
+        base = name[:-len(".service")]
+        if NAME_RE.match(base):
+            return base
+    notes.append("%s=%s dropped: only .service units map to vinit services" % (key, name))
+    return None
+
+
+def convert(path):
+    """Return (name, conf_text, notes) for one unit file."""
+    unit_name = os.path.basename(path)
+    if not unit_name.endswith(".service"):
+        raise Unconvertible("%s: not a .service unit" % path)
+    name = unit_name[:-len(".service")]
+    if "@" in name:
+        raise Unconvertible("%s: template units are not supported; "
+                            "copy the unit to a plain name first" % path)
+    if not NAME_RE.match(name):
+        raise Unconvertible("%s: %r is not a valid vinit service name" % (path, name))
+
+    with open(path, encoding="utf-8") as f:
+        sections = parse_unit(f.read())
+
+    notes = []
+    svc = {}        # [service]
+    restart = {}    # [restart]
+    requires, after = [], []
+    execution = []  # list of (key, value), env repeats
+    limits = []     # list of (key, value)
+    starts, pres = [], []
+    description = None
+
+    for key, value in sections.get("Unit", []):
+        if key == "Description":
+            description = value
+        elif key in ("Requires", "BindsTo", "Requisite"):
+            requires += [n for n in (strip_suffix(v, notes, key) for v in value.split()) if n]
+        elif key in ("After", "Wants"):
+            after += [n for n in (strip_suffix(v, notes, key) for v in value.split()) if n]
+        elif key == "StartLimitBurst":
+            restart["limit"] = int(value)
+        elif key in ("Documentation", "DefaultDependencies"):
+            pass
+        else:
+            notes.append("[Unit] %s=%s not converted" % (key, value))
+
+    stype = "simple"
+    for key, value in sections.get("Service", []):
+        if key == "Type":
+            stype = value
+        elif key == "ExecStart":
+            if value:
+                starts.append(value)
+            else:
+                starts.clear()
+        elif key == "ExecStartPre":
+            pres.append(value)
+        elif key == "Restart":
+            if value == "no":
+                restart["policy"] = "no"
+            elif value in ("on-failure", "on-abnormal", "on-abort", "on-watchdog"):
+                restart["policy"] = "on-failure"
+            elif value == "always":
+                restart["policy"] = "always"
+            elif value == "on-success":
+                restart["policy"] = "always"
+                notes.append("Restart=on-success became policy = always")
+        elif key == "RestartSec":
+            restart["delay_ms"] = min(parse_time(value), MAX_MS)
+        elif key == "StartLimitBurst":
+            restart["limit"] = int(value)
+        elif key == "TimeoutStopSec":
+            svc["stop_timeout_ms"] = min(parse_time(value), MAX_MS)
+        elif key == "User":
+            execution.append(("user", value))
+        elif key == "Group":
+            execution.append(("group", value))
+        elif key == "WorkingDirectory":
+            wd = value.lstrip("-")
+            if wd.startswith("/"):
+                execution.append(("working_directory", wd))
+            else:
+                notes.append("WorkingDirectory=%s not converted: must be an absolute path" % value)
+        elif key == "Environment":
+            for item in shlex.split(value):
+                execution.append(("env", item))
+        elif key == "StandardInput":
+            if value in ("tty", "tty-force", "tty-fail"):
+                execution.append(("stdin", "console"))
+            elif value != "null":
+                notes.append("StandardInput=%s not converted" % value)
+        elif key == "MemoryMax" and re.fullmatch(r"[1-9]\d*[KMGT]?", value):
+            limits.append(("memory_max", value))
+        elif key == "TasksMax" and re.fullmatch(r"[1-9]\d*", value):
+            limits.append(("pids_max", value))
+        elif key == "CPUQuota" and re.fullmatch(r"[1-9]\d*%", value):
+            limits.append(("cpu_max", value))
+        elif key in ("StandardOutput", "StandardError") and value in ("journal", "inherit", "tty"):
+            pass
+        else:
+            notes.append("[Service] %s=%s not converted" % (key, value))
+
+    if stype == "forking":
+        raise Unconvertible("%s: Type=forking is not supported; "
+                            "run the daemon in the foreground instead" % path)
+    if stype in ("simple", "exec", "idle"):
+        svc["type"] = "simple"
+    elif stype == "oneshot":
+        svc["type"] = "oneshot"
+    elif stype in ("notify", "notify-reload", "dbus"):
+        svc["type"] = "simple"
+        notes.append("Type=%s became simple: vinit does not speak sd_notify or D-Bus. "
+                     "If the daemon supports s6-style readiness, set ready_fd" % stype)
+    else:
+        raise Unconvertible("%s: Type=%s is not supported" % (path, stype))
+    if not starts:
+        raise Unconvertible("%s: no ExecStart=" % path)
+    if len(starts) > 1 and svc["type"] != "oneshot":
+        raise Unconvertible("%s: several ExecStart= lines need Type=oneshot" % path)
+
+    command = build_command(starts, pres, notes)
+    # requires implies ordering, so drop the after entries it covers.
+    requires = list(dict.fromkeys(requires))
+    after = [a for a in dict.fromkeys(after) if a not in requires]
+
+    out = ["# Generated from %s by unit2vinit." % unit_name]
+    if description:
+        out.append("# %s" % description)
+    if notes:
+        out.append("#")
+        out.append("# Not converted; review before use:")
+        out += ["#   " + n for n in notes]
+    out += ["", "[service]", "command = " + command]
+    if svc["type"] != "simple":
+        out.append("type = " + svc["type"])
+    if "stop_timeout_ms" in svc:
+        out.append("stop_timeout_ms = %d" % svc["stop_timeout_ms"])
+    if restart:
+        out += ["", "[restart]"]
+        for key in ("policy", "delay_ms", "limit"):
+            if key in restart:
+                out.append("%s = %s" % (key, restart[key]))
+    if requires or after:
+        out += ["", "[dependencies]"]
+        if requires:
+            out.append("requires = " + " ".join(requires))
+        if after:
+            out.append("after = " + " ".join(after))
+    if execution:
+        out += ["", "[execution]"]
+        out += ["%s = %s" % kv for kv in execution]
+    if limits:
+        out += ["", "[limits]"]
+        out += ["%s = %s" % kv for kv in limits]
+    return name, "\n".join(out) + "\n", notes
+
+
+def main(argv):
+    outdir = None
+    args = argv[1:]
+    if args[:1] == ["-o"] and len(args) >= 2:
+        outdir, args = args[1], args[2:]
+    if not args or args[0].startswith("-"):
+        sys.stderr.write(__doc__.split("\n\n")[1] + "\n")
+        return 2
+    status = 0
+    for path in args:
+        try:
+            name, text, notes = convert(path)
+        except (Unconvertible, ValueError, OSError) as e:
+            sys.stderr.write("unit2vinit: %s\n" % e)
+            status = 1
+            continue
+        for n in notes:
+            sys.stderr.write("unit2vinit: %s: %s\n" % (name, n))
+        if outdir is None:
+            sys.stdout.write(text)
+            continue
+        dest = os.path.join(outdir, name + ".conf")
+        tmp = os.path.join(outdir, "." + name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dest)
+        print("wrote " + dest)
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

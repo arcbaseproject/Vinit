@@ -1,0 +1,65 @@
+name: Boot report
+description: Tell us how vinit booted on your machine or VM, good or bad.
+title: "Boot report: <distribution> on <machine>"
+labels: ["boot-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports from real hardware are the most useful thing you can send:
+        vinit has passed only VM tests so far. A report that says "it
+        worked" helps too.
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Booted and shut down cleanly
+        - Booted, but something did not work
+        - Did not boot
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: Vendor and model, or "VM" with the hypervisor.
+      placeholder: ThinkPad X230 / QEMU 9.2 with KVM
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution and how you installed vinit
+      placeholder: Void Linux glibc, contrib/void/install.sh
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: vinit version or commit
+      placeholder: v0.1.0 or d86a5f6
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel and libc
+      placeholder: 6.18.58, musl 1.2.5
+  - type: textarea
+    id: services
+    attributes:
+      label: Services
+      description: Output of "vinitctl list".
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Console log
+      description: The "vinit:" lines from boot and shutdown, if anything went wrong.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Boot time, anything odd, anything you had to change.

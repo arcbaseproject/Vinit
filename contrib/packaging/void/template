@@ -1,0 +1,20 @@
+# Template file for 'vinit'
+pkgname=vinit
+version=0.2.0
+revision=1
+build_style=gnu-makefile
+make_install_args="PREFIX=/usr"
+short_desc="Small init (PID 1) and service supervisor"
+maintainer="arcbaseproject <stormz5m@proton.me>"
+license="MIT"
+homepage="https://github.com/arcbaseproject/Vinit"
+distfiles="https://github.com/arcbaseproject/Vinit/archive/refs/tags/v${version}.tar.gz"
+# Fill in after the v0.2.0 tag exists: xgensum -i vinit
+checksum=0000000000000000000000000000000000000000000000000000000000000000
+
+post_install() {
+	vlicense LICENSE
+	# Installs next to runit, without replacing it: see the README.
+	vmkdir usr/share/vinit/void
+	vcopy "contrib/void/*" usr/share/vinit/void
+}

@@ -27,7 +27,8 @@ See [docs/architecture.md](docs/architecture.md) for the design.
 
 **Contents:** [Build](#build) · [Services](#services) ·
 [vinitctl](#vinitctl) · [Logging](#logging) ·
-[Void Linux](#use-on-void-linux) · [Test](#test) ·
+[Void Linux](#use-on-void-linux) · [Alpine Linux](#use-on-alpine-linux) ·
+[systemd units](#convert-systemd-units) · [Test](#test) ·
 [Measurements](#measurements) · [Known limitations](#known-limitations) ·
 [License](#license)
 
@@ -44,6 +45,14 @@ make LDFLAGS=              # dynamic build
 
 The build adds `-D_FORTIFY_SOURCE=2 -fstack-protector-strong`. musl
 ignores the fortify define.
+
+```sh
+make install               # /usr/bin and man pages; PREFIX and DESTDIR work
+man vinit.conf             # service file reference, also vinit(8), vinitctl(8)
+```
+
+Recipes for Arch, Void and Gentoo packages are in
+[contrib/packaging](contrib/packaging).
 
 ## Services
 
@@ -268,6 +277,64 @@ kernel update, run `install.sh` again, so that the GRUB entry points at
 the new kernel. The script assumes that `/boot` is on the root
 filesystem.
 
+## Use on Alpine Linux
+
+[contrib/alpine](contrib/alpine) installs vinit next to busybox init.
+vinit replaces only busybox init. OpenRC still starts and stops the
+daemons, so `rc-service` and `rc-update` work as before. This setup has
+passed only the file checks in `make test-contrib`, not a boot. Try it
+in a VM first.
+
+As root, from a checkout with static `./vinit` and `./vinitctl` built:
+
+```sh
+sh contrib/alpine/install.sh
+```
+
+The script does these steps:
+
+- It installs `vinit` and `vinitctl` in `/usr/bin`.
+- It makes `openrc sysinit`, `openrc boot` and `openrc default` oneshot
+  services, in that order. The first one is critical.
+- It makes each `respawn` line in `/etc/inittab` a service, for example
+  `getty-tty1`.
+- It makes `openrc shutdown` the shutdown hook, `/etc/vinit/shutdown`.
+
+It does not change the boot loader. To boot vinit once, add
+`init=/usr/bin/vinit` to the kernel command line. busybox `poweroff`,
+`reboot` and `halt` send the signals that vinit expects, so they work
+unchanged. After you change `/etc/inittab`, run
+`sh contrib/alpine/alpine-import.sh` and then `vinitctl reload`.
+
+## Convert systemd units
+
+[contrib/systemd/unit2vinit](contrib/systemd/unit2vinit) converts
+`.service` units to vinit service files. It needs Python 3.
+
+```sh
+contrib/systemd/unit2vinit sshd.service              # print the result
+contrib/systemd/unit2vinit -o /etc/vinit/services *.service
+```
+
+It converts these settings:
+
+- `ExecStart`, `ExecStartPre`, `Type` (`simple`, `exec`, `oneshot`)
+- `Restart`, `RestartSec`, `StartLimitBurst`, `TimeoutStopSec`
+- `Requires`, `BindsTo`, `After`, `Wants`, between `.service` units
+- `User`, `Group`, `WorkingDirectory`, `Environment`, `StandardInput=tty`
+- `MemoryMax`, `TasksMax`, `CPUQuota`, when they are plain numbers
+
+Each setting that it does not convert is listed in a comment at the top
+of the file, and on standard error. Review the files before you use them.
+Two cases need extra care:
+
+- `Type=notify` becomes `simple`. vinit does not speak `sd_notify`. If
+  the daemon supports s6-style readiness, set `ready_fd`.
+- `ExecStartPre`, several `ExecStart` lines and shell syntax become
+  `/bin/sh -c "..."`. The service then gets only vinit's environment.
+
+`Type=forking` and template units (`foo@.service`) are refused.
+
 ## Test
 
 Never install vinit as the init of your development machine. The tests
@@ -277,8 +344,11 @@ below run it in a disposable environment.
 make test-unit   # parser, supervision and event/control checks, under ASan and UBSan
 make test        # test-unit, then vinit as PID 1 in namespaces (no root)
 make test-qemu   # boot the same root filesystem in QEMU
+make test-contrib # unit2vinit and the Alpine import, checked with vinit's parser
 make fuzz        # libFuzzer on parser + resolver (clang); FUZZ_TIME=60 s
 ```
+
+CI also fuzzes the parser for 5 minutes on every push.
 
 To test the musl build, run:
 
@@ -361,7 +431,10 @@ executions under ASan and UBSan, with no crash and no contract violation.
   `chpst -o` (runit).
 - The console is never a controlling terminal, so shells started on it
   have no job control. Use a getty on a real tty for that.
-- x86_64 and ARM64 have passed QEMU boot tests; real hardware remains untested.
+- x86_64 and ARM64 have passed QEMU boot tests; real hardware remains
+  untested. If you boot vinit on a real machine, please file a
+  [boot report](https://github.com/arcbaseproject/Vinit/issues/new?template=hardware-report.yml),
+  whether it worked or not.
 - See [docs/security.md](docs/security.md) for security gaps.
 
 ## License

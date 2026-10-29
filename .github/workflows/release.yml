@@ -6,6 +6,9 @@ on:
 
 permissions:
   contents: write
+  # For the signed build provenance attestation.
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -19,8 +22,14 @@ jobs:
           make CC=musl-gcc
           strip vinit vinitctl
           mkdir dist
-          tar -czf "dist/vinit-${GITHUB_REF_NAME}-x86_64-musl.tar.gz" vinit vinitctl LICENSE README.md
+          tar -czf "dist/vinit-${GITHUB_REF_NAME}-x86_64-musl.tar.gz" vinit vinitctl man LICENSE README.md
           cd dist && sha256sum -- * > SHA256SUMS
+
+      # Users verify with: gh attestation verify FILE --repo arcbaseproject/Vinit
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
 
       - name: Create release
         env:

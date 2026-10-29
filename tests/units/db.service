@@ -1,0 +1,6 @@
+[Unit]
+Description=Example database
+
+[Service]
+ExecStart=/usr/bin/db --data "/var/lib/db"
+Restart=always

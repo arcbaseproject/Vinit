@@ -11,6 +11,8 @@ Run the tests. You do not need root:
 make test   # unit tests under ASan and UBSan, then vinit as PID 1 in namespaces
 ```
 
+If you change a tool in `contrib/`, also run `make test-contrib`.
+
 [README.md](README.md#test) lists what `make test` needs. If you change
 the parser or the dependency resolver, also run `make fuzz` (needs clang).
 CI runs `make test` with glibc and musl on every push and pull request.
@@ -29,6 +31,9 @@ CI runs `make test` with glibc and musl on every push and pull request.
 
 The [known limitations](README.md#known-limitations) are open work. A
 good start is to report how vinit behaves with a daemon you use.
+
+The most useful report right now is a boot on real hardware. Use the
+"Boot report" issue form, whether it worked or not.
 
 ## Security
 
