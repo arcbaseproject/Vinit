@@ -27,6 +27,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -159,12 +160,39 @@ static int cg_prepare(const struct service *s)
 	return 0;
 }
 
+/* Signal pid only while it is still in cgroup cg. The pidfd pins the
+ * process, so a PID reused after the cgroup.procs read is skipped. */
+static void kill_cg_pid(const char *cg, pid_t pid, int sig)
+{
+	char path[32], line[sizeof cg_base + 80];
+	size_t len = strlen(cg);
+	int fd, in = 0;
+	FILE *f;
+
+	if ((fd = (int)syscall(SYS_pidfd_open, pid, 0)) < 0) {
+		/* Before Linux 5.3 there is no pidfd: signal by PID, racy. */
+		if (errno != ESRCH)
+			kill(pid, sig);
+		return;
+	}
+	snprintf(path, sizeof path, "/proc/%d/cgroup", (int)pid);
+	if ((f = fopen(path, "re"))) {
+		while (!in && fgets(line, sizeof line, f))
+			in = strncmp(line, "0::", 3) == 0 && strncmp(line + 3, cg, len) == 0 &&
+			     (line[3 + len] == '\n' || line[3 + len] == '/');
+		fclose(f);
+	}
+	if (in)
+		(void)syscall(SYS_pidfd_send_signal, fd, sig, NULL, 0);
+	close(fd);
+}
+
 /* Signal everything the service started: its process group and, with
  * cgroups, also processes that left the group with setsid() or
  * setpgid(). Without a leader, as after a oneshot, only the cgroup. */
 static void kill_service(const struct service *s, int sig)
 {
-	char path[sizeof cg_base + 64], line[32];
+	char path[sizeof cg_base + 64], cg[sizeof cg_base + 64], line[32];
 	FILE *f;
 	pid_t pid;
 
@@ -176,13 +204,14 @@ static void kill_service(const struct service *s, int sig)
 	cg_path(s, "cgroup.kill", path, sizeof path);
 	if (sig == SIGKILL && write_file(path, "1") == 0)
 		return;
+	cg_path(s, NULL, cg, sizeof cg);
 	cg_path(s, "cgroup.procs", path, sizeof path);
 	if (!(f = fopen(path, "re")))
 		return;
 	/* kill(0) or kill(-1) would hit PID 1's own group or everything. */
 	while (fgets(line, sizeof line, f))
 		if ((pid = (pid_t)atoi(line)) > 1)
-			kill(pid, sig);
+			kill_cg_pid(cg + strlen(CGROUP_ROOT), pid, sig);
 	fclose(f);
 }
 
