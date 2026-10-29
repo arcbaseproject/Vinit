@@ -233,4 +233,3 @@ on purpose:
 - More resource limits than `[limits]` has. Until then, wrap the
   command, for example
   `command = /usr/bin/prlimit --nofile=65536 -- /usr/sbin/nginx`.
-- Run the tests in CI.
