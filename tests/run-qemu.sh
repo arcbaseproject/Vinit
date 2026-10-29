@@ -41,6 +41,15 @@ fail=0
 . tests/checks.sh
 run_checks "$log"
 
+# Each service gets a cgroup with its limits.
+check 'using cgroup /sys/fs/cgroup'
+check 'svc-test limited: cgroup 0::/limited.service'
+check 'svc-test limited: /sys/fs/cgroup/limited.service/memory.max 67108864'
+check 'svc-test limited: /sys/fs/cgroup/limited.service/pids.max 8'
+check 'svc-test limited: /sys/fs/cgroup/limited.service/cpu.max 50000 100000'
+check 'svc-test limited: forks allowed under pids_max = 8: 7'
+check 'svc-test check: escaped child is gone'
+
 # In a real VM the device filesystems must mount.
 if grep -q 'vinit: mount' "$log"; then
 	echo "FAIL: a mount failed"

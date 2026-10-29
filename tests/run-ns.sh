@@ -25,6 +25,11 @@ fail=0
 . tests/checks.sh
 run_checks "$log"
 
+# No cgroup namespace here: services fall back to process groups.
+check 'no cgroup v2; services run in process groups only'
+check 'limited: resource limits need cgroup v2'
+check 'svc-test check: escaped child survives without cgroups'
+
 # reboot(RB_POWER_OFF) in a PID namespace kills the namespace init with
 # SIGINT; unshare re-raises it, so the shell sees 128 + 2.
 [ "$status" -eq 130 ] || { echo "FAIL: exit status $status, want 130"; fail=1; }
