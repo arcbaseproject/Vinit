@@ -54,6 +54,8 @@ in {
         ExecStop = stop;
         TimeoutStopSec = 45;
         KillMode = "control-group";
+        # Vinit creates a cgroup per service below its own.
+        Delegate = true;
         Restart = "on-failure";
         NoNewPrivileges = true;
       };
