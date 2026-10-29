@@ -93,7 +93,7 @@ test checks for this.
 Each reply is limited to 8 KiB. The full service table (64 services, one
 line each) fits in that.
 
-### Reaping, and why there is no pidfd
+### Reaping, and where pidfd is used
 
 `reap_children()` first peeks with `waitid(WNOWAIT)`. While the zombie
 exists, its PID, and so its process group ID, cannot be reused. This makes
@@ -101,7 +101,10 @@ it safe to `kill(-pgid, SIGKILL)` the service's leftover processes. Only
 then does vinit reap the child.
 
 Direct children cannot have PID reuse races, because PID 1 is the parent
-of every service. pidfd therefore adds nothing here.
+of every service. pidfd therefore adds nothing here. vinit uses a pidfd
+only for processes in a service's cgroup that are not its children: before
+it sends SIGTERM or SIGCONT, it checks that the process is still in the
+cgroup.
 
 ### Starting a service
 
