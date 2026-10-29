@@ -1,0 +1,203 @@
+.Dd October 28, 2026
+.Dt VINIT.CONF 5
+.Os
+.Sh NAME
+.Nm vinit.conf
+.Nd vinit service file format
+.Sh SYNOPSIS
+.Pa /etc/vinit/services/ Ns Ar name Ns Pa .conf
+.Sh DESCRIPTION
+Each file in
+.Pa /etc/vinit/services
+whose name ends in
+.Pa .conf
+defines one service for
+.Xr vinit 8 .
+The file name without
+.Pa .conf
+is the service name.
+A service name starts with a letter, digit or underscore, and contains
+only letters, digits and the characters
+.Ql _.@- .
+.Pp
+The file has sections in square brackets, and lines of the form
+.Ql key = value .
+A line that starts with
+.Ql #
+or
+.Ql \&;
+is a comment.
+A comment must be on its own line.
+.Pp
+The parser is strict.
+.Xr vinit 8
+rejects the whole file if it has an unknown section or key, a duplicate
+key, an empty or malformed value, or a line longer than 1023 bytes.
+It also rejects a file that is not owned by root, or that is writable
+by group or others.
+.Sh SECTION [service]
+.Bl -tag -width Ds
+.It Cm command = Ar path Op Ar arg ...
+Required.
+The command to run.
+It never runs through a shell.
+Words are separated by whitespace.
+Double quotes group words, and inside them
+.Ql \e"
+and
+.Ql \e\e
+are the only escapes.
+Outside quotes, the characters
+.Ql \(aq \(ga $ \&| \&; & < > \e
+are rejected.
+The first word must be an absolute path.
+To use a shell, write
+.Ql command = /bin/sh -c \(dq...\(dq .
+.It Cm name = Ar name
+Optional.
+Must match the file name.
+.It Cm type = simple | oneshot
+A
+.Cm simple
+service is a long-running process.
+A
+.Cm oneshot
+service runs to completion; it is ready when it exits with status 0.
+Default:
+.Cm simple .
+.It Cm stop_timeout_ms = Ar ms
+Time between
+.Dv SIGTERM
+and
+.Dv SIGKILL
+when the service stops.
+Default: 5000.
+.It Cm ready_fd = Ar fd
+Give the service the write end of a pipe as file descriptor
+.Ar fd ,
+from 3 to 1023.
+The service stays
+.Dq starting
+until it writes a newline there.
+Only for
+.Cm type = simple .
+.It Cm ready_timeout_ms = Ar ms
+If the service is not ready after
+.Ar ms ,
+stop it and count the run as a failure.
+Needs
+.Cm ready_fd .
+Default: 0, wait forever.
+.It Cm critical = yes | no
+If
+.Cm yes
+and the service fails,
+.Xr vinit 8
+starts an emergency shell.
+Default:
+.Cm no .
+.El
+.Sh SECTION [restart]
+.Bl -tag -width Ds
+.It Cm policy = no | on-failure | always
+When to restart the service after it exits.
+.Cm always
+also repeats a successful oneshot.
+Default:
+.Cm no .
+.It Cm delay_ms = Ar ms
+Delay before the first restart.
+The delay doubles after each consecutive restart, up to 60 seconds.
+A run that lasts 10 seconds or more resets the count.
+Default: 1000.
+.It Cm limit = Ar n
+Give up after
+.Ar n
+consecutive restarts.
+Default: 0, never give up.
+.El
+.Sh SECTION [dependencies]
+Each key takes a list of service names separated by spaces, and may be
+repeated.
+.Xr vinit 8
+rejects unknown names and dependency cycles.
+.Bl -tag -width Ds
+.It Cm requires = Ar name ...
+Start these services first, and start this service only when they are
+ready.
+If one of them fails, this service fails too.
+If one of them stops, this service stops too, and starts again when the
+dependency is ready again.
+.It Cm after = Ar name ...
+Ordering only.
+Wait while these services are starting or waiting to restart.
+Do not wait for a service that has failed or stopped.
+.El
+.Sh SECTION [execution]
+.Bl -tag -width Ds
+.It Cm user = Ar name | uid
+Run as this user, from
+.Pa /etc/passwd .
+.It Cm group = Ar name | gid
+Run with this group instead of the user's primary group.
+.It Cm working_directory = Ar path
+Absolute path of the working directory.
+Default:
+.Pa / .
+.It Cm env = Ar NAME Ns = Ns Ar value
+Set an environment variable.
+May be repeated.
+.It Cm stdin = null | console
+Default:
+.Cm null .
+.It Cm log = Ar name
+Send standard output and standard error through a pipe to the standard
+input of service
+.Ar name ,
+as runit log services do.
+Implies
+.Cm after = Ar name .
+.El
+.Sh SECTION [limits]
+All keys are optional.
+Each needs cgroup v2; without it, a service with limits fails to start.
+.Bl -tag -width Ds
+.It Cm memory_max = Ar size
+Memory limit in bytes, with an optional
+.Cm K ,
+.Cm M ,
+.Cm G
+or
+.Cm T
+suffix (powers of 1024).
+.It Cm pids_max = Ar n
+Limit on processes and threads.
+.It Cm cpu_max = Ar percent Ns %
+CPU limit as a percentage of one CPU.
+.Ql 200%
+is two CPUs.
+.El
+.Sh FILES
+.Bl -tag -width /etc/vinit/services -compact
+.It Pa /etc/vinit/services
+Service files.
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+[service]
+command = /usr/sbin/sshd -D
+stop_timeout_ms = 5000
+
+[restart]
+policy = on-failure
+limit = 5
+
+[dependencies]
+requires = network
+
+[execution]
+log = sshd-log
+.Ed
+.Sh SEE ALSO
+.Xr vinit 8 ,
+.Xr vinitctl 8

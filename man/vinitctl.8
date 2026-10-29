@@ -1,0 +1,101 @@
+.Dd October 28, 2026
+.Dt VINITCTL 8
+.Os
+.Sh NAME
+.Nm vinitctl
+.Nd control the vinit service supervisor
+.Sh SYNOPSIS
+.Nm
+.Cm status
+.Op Ar service
+.Nm
+.Cm list
+.Nm
+.Cm start | stop | restart
+.Ar service
+.Nm
+.Cm reload
+.Nm
+.Cm reboot | poweroff | halt
+.Sh DESCRIPTION
+.Nm
+sends one command to
+.Xr vinit 8
+and prints the reply.
+Any user may run
+.Cm status
+and
+.Cm list .
+All other commands need uid 0.
+.Bl -tag -width "restart service"
+.It Cm status Op Ar service
+Without
+.Ar service ,
+print the number of services in each state.
+With
+.Ar service ,
+print its state, pid, type, restart count, last exit status and error.
+.It Cm list
+Print one line per service.
+.It Cm start Ar service
+Start
+.Ar service
+and the services it requires.
+.It Cm stop Ar service
+Stop the services that require
+.Ar service ,
+then stop
+.Ar service .
+.It Cm restart Ar service
+Restart
+.Ar service .
+Services that depend on it keep running.
+.It Cm reload
+Read
+.Pa /etc/vinit/services
+again.
+New services start, changed services restart, and unchanged services
+keep running.
+The reload is all or nothing: it is refused, and nothing changes, if it
+would put a working service into an error state, or remove a service
+that is still active.
+.It Cm reboot , poweroff , halt
+Shut down the system.
+.El
+.Pp
+.Cm start ,
+.Cm stop
+and
+.Cm restart
+return as soon as
+.Xr vinit 8
+accepts the command.
+Run
+.Nm
+.Cm status
+to follow progress.
+.Sh FILES
+.Bl -tag -width /run/vinit/control -compact
+.It Pa /run/vinit/control
+Control socket.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+Success.
+.It 1
+.Xr vinit 8
+reported an error.
+.It 2
+Usage error, or no connection to
+.Xr vinit 8 .
+.El
+.Sh EXAMPLES
+Edit a service file, then apply the change:
+.Bd -literal -offset indent
+# vinitctl reload
+# vinitctl status sshd
+.Ed
+.Sh SEE ALSO
+.Xr vinit.conf 5 ,
+.Xr vinit 8

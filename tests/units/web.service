@@ -1,0 +1,24 @@
+[Unit]
+Description=Example web server
+After=network.target db.service
+Wants=db.service
+Requires=db.service
+StartLimitBurst=5
+
+[Service]
+Type=notify
+ExecStartPre=-/usr/bin/mkdir -p /run/web
+ExecStart=/usr/bin/web --port 8080 \
+	--root /srv/www
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=1min 30s
+User=www
+Group=www
+WorkingDirectory=-/srv/www
+Environment="LANG=C.UTF-8" MODE=prod
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

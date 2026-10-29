@@ -1,0 +1,141 @@
+.Dd October 28, 2026
+.Dt VINIT 8
+.Os
+.Sh NAME
+.Nm vinit
+.Nd small init and service supervisor
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+runs as process 1.
+It mounts the API filesystems, starts every service defined in
+.Pa /etc/vinit/services ,
+supervises them, reaps orphaned processes and shuts the system down.
+It takes commands from
+.Xr vinitctl 8
+over a Unix socket.
+.Pp
+To boot with
+.Nm ,
+add
+.Ql init=/usr/bin/vinit
+to the kernel command line.
+.Nm
+refuses to run as any process other than 1.
+.Ss Boot
+.Nm
+mounts
+.Pa /proc ,
+.Pa /sys ,
+.Pa /dev ,
+.Pa /dev/pts ,
+.Pa /dev/shm
+and
+.Pa /run
+if they are not mounted yet.
+Then it reads every
+.Pa *.conf
+file in
+.Pa /etc/vinit/services ,
+checks dependencies and starts all services in dependency order.
+.Xr vinit.conf 5
+describes the file format.
+A file that is invalid marks its service failed; the other services
+still start.
+.Ss Supervision
+Each service runs in its own session, so its process group holds
+everything it starts.
+With cgroup v2, each service also runs in its own cgroup,
+.Ar name Ns Pa .service ,
+next to
+.Pa init.scope ,
+which holds
+.Nm
+itself.
+Stop signals go to every process in the cgroup, so a process that leaves
+its process group cannot escape.
+.Nm
+mounts cgroup v2 on
+.Pa /sys/fs/cgroup
+if it is not mounted yet.
+When a service exits,
+.Nm
+applies its restart policy with exponential backoff.
+Readiness notification follows the s6 protocol: the service writes a
+newline to a file descriptor.
+.Ss Shutdown
+On shutdown,
+.Nm
+stops services in reverse dependency order.
+It sends
+.Dv SIGTERM
+to each process group, then
+.Dv SIGKILL
+after the stop timeout.
+Then it runs
+.Pa /etc/vinit/shutdown
+with the argument
+.Cm reboot ,
+.Cm poweroff
+or
+.Cm halt ,
+if that file is executable.
+Last, it kills all remaining processes, turns off swap, unmounts all
+filesystems, remounts
+.Pa /
+read-only and reboots, powers off or halts.
+.Ss Emergency shell
+.Nm
+starts
+.Pa /bin/sh
+on the console if no service file is usable, or if a service with
+.Cm critical = yes
+fails.
+.Sh SIGNALS
+.Bl -tag -width "SIGTERM, SIGINT"
+.It Dv SIGTERM , SIGINT
+Reboot.
+The kernel sends
+.Dv SIGINT
+on Ctrl-Alt-Del.
+.It Dv SIGUSR1
+Halt.
+.It Dv SIGUSR2
+Power off.
+.El
+.Pp
+These are the signals that busybox
+.Xr reboot 8 ,
+.Xr halt 8
+and
+.Xr poweroff 8
+send.
+.Sh KERNEL COMMAND LINE
+.Bl -tag -width vinit.quiet
+.It Cm vinit.quiet
+Print only warnings and errors on the console.
+.El
+.Sh ENVIRONMENT
+Services get only
+.Ev PATH ,
+.Ev TERM
+and the variables set with
+.Cm env
+in their service file.
+.Sh FILES
+.Bl -tag -width /etc/vinit/services -compact
+.It Pa /etc/vinit/services
+Service files.
+.It Pa /etc/vinit/shutdown
+Optional shutdown hook.
+.It Pa /run/vinit/control
+Control socket.
+.El
+.Sh SEE ALSO
+.Xr vinit.conf 5 ,
+.Xr vinitctl 8
+.Sh BUGS
+.Nm
+is experimental.
+It has had no independent security review and no use on real hardware.

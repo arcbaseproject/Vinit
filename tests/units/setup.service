@@ -1,0 +1,4 @@
+[Service]
+Type=oneshot
+ExecStart=/bin/echo one
+ExecStart=/usr/bin/touch /run/ready-$HOSTNAME
