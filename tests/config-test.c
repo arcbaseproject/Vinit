@@ -29,8 +29,11 @@ static void put(const char *name, const char *text, mode_t mode)
 		exit(1);
 	}
 	fputs(text, f);
+	if (fchmod(fileno(f), mode) < 0) {
+		perror("fchmod");
+		exit(1);
+	}
 	fclose(f);
-	chmod(path, mode);
 }
 
 static int parse(struct service *s, const char *name, const char *text, mode_t mode)

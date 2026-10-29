@@ -1,6 +1,7 @@
 /* Supervision regressions; runs without PID 1 or elevated privileges. */
 #define _GNU_SOURCE
 #include <assert.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -190,19 +191,23 @@ static void unsafe_service_dir(void)
 {
 	char dir[] = "/tmp/vinit-service-test.XXXXXX";
 	char path[256];
+	int fd;
 	FILE *f;
 
 	assert(mkdtemp(dir));
+	fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	assert(fd >= 0);
 	snprintf(path, sizeof path, "%s/job.conf", dir);
 	f = fopen(path, "w");
 	assert(f);
 	fputs("[service]\ncommand = /bin/sh -c true\n", f);
 	assert(fclose(f) == 0);
-	assert(chmod(dir, 0777) == 0);
+	assert(fchmod(fd, 0777) == 0);
 	memset(svc, 0, sizeof svc);
 	services_load(dir);
 	assert(nsvc == 1 && svc[0].builtin);
-	assert(chmod(dir, 0755) == 0);
+	assert(fchmod(fd, 0755) == 0);
+	assert(close(fd) == 0);
 	memset(svc, 0, sizeof svc);
 	services_load(dir);
 	assert(nsvc == 1 && !svc[0].builtin);
