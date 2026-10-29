@@ -75,6 +75,7 @@ int test_poll(struct pollfd *fds, nfds_t n, int timeout)
 	assert(timeout == 100);
 	return poll(fds, n, timeout);
 }
+void cgroup_init(void) {}
 void services_load(const char *dir)
 {
 	(void)dir;

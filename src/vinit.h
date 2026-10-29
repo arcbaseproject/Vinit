@@ -5,6 +5,7 @@
 #include <sys/types.h>
 
 #define SERVICE_DIR   "/etc/vinit/services"
+#define CGROUP_ROOT   "/sys/fs/cgroup"
 #define MAX_SERVICES  64
 #define MAX_ARGS      32
 #define MAX_ENV       16
@@ -70,6 +71,7 @@ void config_resolve(struct service *svc, int n);
 /* service.c */
 struct pollfd;
 
+void cgroup_init(void);
 void services_load(const char *dir);
 int services_reload(const char *dir, long long now, char *msg, size_t len);
 int services_pollfds(struct pollfd *pfd);
