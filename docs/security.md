@@ -84,9 +84,11 @@ It is **not** an independent audit.
   process group. Such processes are only killed at the final `kill(-1)`
   during shutdown.
 - **PID reuse in a cgroup.** SIGTERM and SIGCONT go to each PID read from
-  `cgroup.procs`. A process that exits between the read and the `kill()`
-  frees its PID for reuse, so the signal could reach an unrelated
-  process. SIGKILL uses `cgroup.kill` where it exists (Linux 5.14), which
-  has no such race.
+  `cgroup.procs`. Since Linux 5.3, vinit opens a pidfd for each PID and
+  signals it only if the process is still in the service's cgroup, so a
+  reused PID is skipped. On older kernels it falls back to `kill()`, and a
+  process that exits between the read and the `kill()` frees its PID for
+  reuse, so the signal could reach an unrelated process. SIGKILL uses
+  `cgroup.kill` where it exists (Linux 5.14), which has no such race.
 - **Hardware coverage.** x86_64 and ARM64 passed the normal and quiet QEMU
   boot/shutdown suites with Linux 6.18.59. Real hardware remains untested.
